@@ -1,0 +1,3 @@
+import { NextRequest, NextResponse } from "next/server";
+import { getCurrentWeather } from "@/lib/data-sources/weather";
+export async function GET(request: NextRequest) { const p = new URL(request.url).searchParams; const lat = Number(p.get("lat")); const lng = Number(p.get("lng")); if (!Number.isFinite(lat) || !Number.isFinite(lng)) return NextResponse.json({ error: "Valid coordinates are required." }, { status: 400 }); try { return NextResponse.json(await getCurrentWeather(lat, lng)); } catch (error) { console.error("Weather request failed", error); return NextResponse.json({ error: "Weather source unavailable. No weather values were substituted." }, { status: 503 }); } }

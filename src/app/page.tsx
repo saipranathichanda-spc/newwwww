@@ -1,5 +1,7 @@
-import { redirect } from "next/navigation";
+"use client";
+
+import UserPortalPage from "./user/page";
 
 export default function Home() {
-  redirect("/user");
+  return <UserPortalPage />;
 }

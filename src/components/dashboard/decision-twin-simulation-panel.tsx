@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   type DecisionTwin,
   type SimulationResult,
@@ -106,27 +106,42 @@ export function DecisionTwinSimulationPanel({
 
   // Re-run Monte Carlo when deterministic twin, iterations, or seed change
   const executeMonteCarlo = useCallback(
-    (targetTwin: DecisionTwin, iters = mcIterations, seedVal = mcSeed, uncerts = uncertainties) => {
+    (targetTwin: DecisionTwin, iters = mcIterations, seedVal = mcSeed, customUncerts?: Record<string, UncertaintyVariable>) => {
+      const activeUncerts = customUncerts ?? getDefaultUncertainties(targetTwin);
       const res = runMonteCarloSimulation(targetTwin, {
         iterations: iters,
         seed: seedVal,
-        uncertainties: uncerts
+        uncertainties: activeUncerts
       });
       setProbResult(res);
     },
-    [mcIterations, mcSeed, uncertainties]
+    [mcIterations, mcSeed]
   );
 
-  // Keep uncertainties in sync with twin population
-  useEffect(() => {
-    setUncertainties(getDefaultUncertainties(twin));
-    executeMonteCarlo(twin, mcIterations, mcSeed);
-  }, [twin, executeMonteCarlo, mcIterations, mcSeed]);
+  // Prevent infinite simulation loops: only run Monte Carlo when twin parameters actually change
+  const lastExecutedKeyRef = useRef<string>("");
+  const currentTwinFingerprint = `${twin.scenarioId}-${twin.estimatedPopulation.value}-${twin.resources.buses.value}-${twin.resources.boats.value}-${twin.resources.ambulances.value}-${twin.resources.rescueTeams.value}-${twin.resources.budget.value}-${twin.constraints.roadClosures.allowedValue?.join(",")}-${twin.weatherContext?.rainfallMm}-${mcIterations}-${mcSeed}`;
 
-  // Sync to parent dashboard & map
   useEffect(() => {
-    onDecisionTwinChange?.(twin, result);
-  }, [twin, result, onDecisionTwinChange]);
+    if (lastExecutedKeyRef.current === currentTwinFingerprint) return;
+    lastExecutedKeyRef.current = currentTwinFingerprint;
+
+    const uncerts = getDefaultUncertainties(twin);
+    setUncertainties(uncerts);
+    executeMonteCarlo(twin, mcIterations, mcSeed, uncerts);
+  }, [currentTwinFingerprint, twin, mcIterations, mcSeed, executeMonteCarlo]);
+
+  // Sync to parent dashboard & map with guard to prevent infinite render ping-pong
+  const onDecisionTwinChangeRef = useRef(onDecisionTwinChange);
+  onDecisionTwinChangeRef.current = onDecisionTwinChange;
+  const lastSyncedKeyRef = useRef<string>("");
+
+  useEffect(() => {
+    const syncKey = `${twin.scenarioId}-${twin.location.name}-${twin.routes?.length ?? 0}-${result.score}-${result.feasible}`;
+    if (lastSyncedKeyRef.current === syncKey) return;
+    lastSyncedKeyRef.current = syncKey;
+    onDecisionTwinChangeRef.current?.(twin, result);
+  }, [twin, result]);
 
   const [activeTab, setActiveTab] = useState<"deterministic" | "probabilistic" | "routes" | "twin-spec" | "transparency">("probabilistic");
   const [selectedRouteIdx, setSelectedRouteIdx] = useState(0);

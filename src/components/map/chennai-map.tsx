@@ -94,9 +94,13 @@ export function ChennaiMap({
   const [hospitalStatus, setHospitalStatus] = useState("Loading nearby hospitals in flood zone…");
   const [weather, setWeather] = useState<WeatherContext | null>(null);
 
+  const lastResolvedTargetRef = useRef<string>("");
+
   const resolveAndRoute = useCallback(async (targetPlace: string) => {
     const trimmed = targetPlace.trim();
     if (!trimmed) return;
+    if (lastResolvedTargetRef.current === trimmed) return;
+    lastResolvedTargetRef.current = trimmed;
     setRoutingStatus(`Resolving "${trimmed}"…`);
 
     const lower = trimmed.toLowerCase();
@@ -136,8 +140,16 @@ export function ChennaiMap({
       matched = { name: "Chennai Central", lng: 80.2757, lat: 13.0827 };
     }
 
-    setDestination(matched);
-    onDestinationChange?.(matched.name);
+    setDestination((prev) => {
+      if (
+        prev.name === matched!.name &&
+        Math.abs(prev.lng - matched!.lng) < 0.0001 &&
+        Math.abs(prev.lat - matched!.lat) < 0.0001
+      ) {
+        return prev;
+      }
+      return matched!;
+    });
 
     // Fetch routes from VIT Chennai to the flood destination
     setRoutingStatus(`Routing from VIT Chennai Base → ${matched.name}…`);
@@ -159,7 +171,7 @@ export function ChennaiMap({
       setRoutes([]);
       setRoutingStatus("Route service unavailable. No substitute route was used.");
     }
-  }, [onDestinationChange]);
+  }, []);
 
   // Sync when prop changes
   useEffect(() => {
@@ -167,8 +179,7 @@ export function ChennaiMap({
       setDestinationInput(floodDestination);
       resolveAndRoute(floodDestination);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [floodDestination]);
+  }, [floodDestination, resolveAndRoute, destinationInput]);
 
   // Update markers and camera bounds when destination or map readiness changes
   useEffect(() => {
@@ -392,16 +403,10 @@ export function ChennaiMap({
 
   // Initialize MapLibre
   useEffect(() => {
-    const css = document.createElement("link");
-    css.rel = "stylesheet";
-    css.href = MAPLIBRE_CSS;
-    document.head.appendChild(css);
+    let isCancelled = false;
 
-    const script = document.createElement("script");
-    script.src = MAPLIBRE_JS;
-    script.async = true;
-    script.onload = () => {
-      if (!mapNode.current || !window.maplibregl) return;
+    function initMap() {
+      if (isCancelled || !mapNode.current || !window.maplibregl || mapRef.current) return;
       const map = new window.maplibregl.Map({
         container: mapNode.current,
         style: BASEMAP_STYLE,
@@ -411,28 +416,66 @@ export function ChennaiMap({
       });
       map.addControl(new window.maplibregl.NavigationControl(), "top-right");
       map.on("load", () => {
+        if (isCancelled) return;
         setMapReady(true);
         resolveAndRoute(destinationInput);
       });
       mapRef.current = map;
-    };
-    document.head.appendChild(script);
+    }
+
+    if (!document.querySelector(`link[href="${MAPLIBRE_CSS}"]`)) {
+      const css = document.createElement("link");
+      css.rel = "stylesheet";
+      css.href = MAPLIBRE_CSS;
+      document.head.appendChild(css);
+    }
+
+    if (window.maplibregl) {
+      initMap();
+    } else if (!document.querySelector(`script[src="${MAPLIBRE_JS}"]`)) {
+      const script = document.createElement("script");
+      script.src = MAPLIBRE_JS;
+      script.async = true;
+      script.onload = () => {
+        initMap();
+      };
+      document.head.appendChild(script);
+    } else {
+      const checkInterval = setInterval(() => {
+        if (window.maplibregl) {
+          clearInterval(checkInterval);
+          initMap();
+        }
+      }, 50);
+      return () => {
+        isCancelled = true;
+        clearInterval(checkInterval);
+        mapRef.current?.remove();
+        mapRef.current = null;
+        setMapReady(false);
+      };
+    }
 
     return () => {
+      isCancelled = true;
       mapRef.current?.remove();
-      script.remove();
-      css.remove();
+      mapRef.current = null;
+      setMapReady(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function handleFormSubmit(e: FormEvent) {
     e.preventDefault();
+    lastResolvedTargetRef.current = "";
+    onDestinationChange?.(destinationInput);
     resolveAndRoute(destinationInput);
   }
 
   function handleQuickPick(place: string) {
+    lastResolvedTargetRef.current = "";
     setDestinationInput(place);
+    onDestinationChange?.(place);
     resolveAndRoute(place);
   }
 

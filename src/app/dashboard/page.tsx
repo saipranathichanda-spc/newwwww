@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { ChennaiMap } from "@/components/map/chennai-map";
 import { DecisionTwinSimulationPanel } from "@/components/dashboard/decision-twin-simulation-panel";
@@ -83,7 +83,15 @@ export default function DashboardPage() {
           triggerEmergencyChime();
         }
         previousCountRef.current = data.length;
-        setReports(data);
+        setReports((prev) => {
+          if (
+            prev.length === data.length &&
+            prev.every((r, idx) => r.id === data[idx]?.id && r.status === data[idx]?.status)
+          ) {
+            return prev;
+          }
+          return data;
+        });
       }
     } catch {
       // network hiccup fallback
@@ -91,6 +99,20 @@ export default function DashboardPage() {
       setReportsLoading(false);
     }
   }
+
+  const handleDecisionTwinChange = useCallback((twin: DecisionTwin, _sim: SimulationResult) => {
+    if (twin.location?.name) {
+      setFloodLocation((prev) => (prev !== twin.location.name ? twin.location.name : prev));
+    }
+    if (twin.routes && twin.routes.length > 0) {
+      setSimulationRoutes((prev) => {
+        if (prev && prev.length === twin.routes.length && prev[0]?.id === twin.routes[0]?.id) {
+          return prev;
+        }
+        return twin.routes;
+      });
+    }
+  }, []);
 
   useEffect(() => {
     loadReports();
@@ -325,14 +347,7 @@ export default function DashboardPage() {
           <div className="space-y-6">
             <DecisionTwinSimulationPanel
               initialPlace={floodLocation}
-              onDecisionTwinChange={(twin, sim) => {
-                if (twin.location?.name && twin.location.name !== floodLocation) {
-                  setFloodLocation(twin.location.name);
-                }
-                if (twin.routes && twin.routes.length > 0) {
-                  setSimulationRoutes(twin.routes);
-                }
-              }}
+              onDecisionTwinChange={handleDecisionTwinChange}
               onSelectRoute={(idx) => {
                 setSelectedRouteIndex(idx);
                 const mapEl = document.getElementById("admin-chennai-map");

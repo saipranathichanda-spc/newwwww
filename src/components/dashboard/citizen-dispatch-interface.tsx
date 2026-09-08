@@ -367,7 +367,6 @@ export function CitizenDispatchInterface({
                 <ChennaiMap
                   floodDestination={selectedReport.location.name}
                   focusedReport={selectedReport}
-                  onDestinationChange={() => {}}
                 />
               </div>
             </div>

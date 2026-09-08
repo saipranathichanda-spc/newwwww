@@ -11,7 +11,8 @@ import {
   updateDecisionTwinPriorities,
   updateDecisionTwinRoadClosure,
   updateDecisionTwinWeatherDelta,
-  normalizePriorities
+  normalizePriorities,
+  KNOWN_PLACES
 } from "@/lib/decision-twin";
 import {
   SCENARIO_PRESETS,
@@ -57,6 +58,9 @@ export function DecisionTwinSimulationPanel({
       priorities: preset.defaultPriorities
     });
   });
+
+  const [customLocationInput, setCustomLocationInput] = useState("");
+  const [customPopulation, setCustomPopulation] = useState(3500);
 
   // Dynamic Destination Selection
   const currentPreset = useMemo(() => {
@@ -170,26 +174,34 @@ export function DecisionTwinSimulationPanel({
     executeMonteCarlo(twin, mcIterations, newSeed);
   }
 
-  // Automatic Scenario Preset Loader (1-Click)
-  async function selectPreset(preset: ScenarioPreset) {
-    setSelectedPresetId(preset.id);
+  // Universal Scenario Builder for ANY Chennai Location (e.g. T Nagar, Anna Nagar, Adyar, Mylapore...)
+  async function handleBuildScenario(placeName: string, pop: number = customPopulation) {
+    const trimmed = placeName.trim();
+    if (!trimmed) return;
     setLoadingBackend(true);
     setIsRoute1Closed(false);
     setIsSurgeRainfall(false);
+
+    // Auto-calculate realistic required vehicles based on population
+    const autoBuses = Math.min(25, Math.max(4, Math.ceil(pop / 350)));
+    const autoBoats = Math.min(12, Math.max(2, Math.ceil(pop / 800)));
+    const autoAmbulances = Math.min(12, Math.max(3, Math.ceil(pop / 600)));
+    const autoTeams = Math.min(30, Math.max(6, Math.ceil(pop / 200)));
+    const autoBudget = Math.max(500000, Math.ceil(pop * 180));
 
     try {
       const res = await fetch("/api/decision/build", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          place: preset.locationName,
-          population: preset.defaultPopulation,
-          buses: preset.defaultResources.buses,
-          boats: preset.defaultResources.boats,
-          ambulances: preset.defaultResources.ambulances,
-          rescueTeams: preset.defaultResources.rescueTeams,
-          budget: preset.defaultResources.budget,
-          priorities: preset.defaultPriorities
+          place: trimmed,
+          population: pop,
+          buses: autoBuses,
+          boats: autoBoats,
+          ambulances: autoAmbulances,
+          rescueTeams: autoTeams,
+          budget: autoBudget,
+          priorities: twin.priorities
         })
       });
 
@@ -202,49 +214,60 @@ export function DecisionTwinSimulationPanel({
         }
       }
 
-      // Fallback local creation if network offline
+      // Offline / network fallback with known place resolution
+      const lower = trimmed.toLowerCase();
+      const match = Object.entries(KNOWN_PLACES).find(([k]) => lower.includes(k));
+      const lat = match ? match[1].lat : 13.0418;
+      const lng = match ? match[1].lng : 80.2341;
+
       const fallbackTwin = createDefaultDecisionTwin({
-        placeName: preset.locationName,
-        lat: preset.coords.lat,
-        lng: preset.coords.lng,
-        population: preset.defaultPopulation,
-        buses: preset.defaultResources.buses,
-        boats: preset.defaultResources.boats,
-        ambulances: preset.defaultResources.ambulances,
-        rescueTeams: preset.defaultResources.rescueTeams,
-        budget: preset.defaultResources.budget,
-        priorities: preset.defaultPriorities
+        placeName: match ? match[1].label : `${trimmed}, Chennai`,
+        lat,
+        lng,
+        population: pop,
+        buses: autoBuses,
+        boats: autoBoats,
+        ambulances: autoAmbulances,
+        rescueTeams: autoTeams,
+        budget: autoBudget,
+        priorities: twin.priorities
       });
       setTwin(fallbackTwin);
       executeMonteCarlo(fallbackTwin, mcIterations, mcSeed);
     } catch (e) {
-      console.error("Failed to fetch preset scenario from backend", e);
+      console.error("Failed to build scenario for " + trimmed, e);
     } finally {
       setLoadingBackend(false);
     }
+  }
+
+  // Automatic Scenario Preset Loader
+  async function selectPreset(preset: ScenarioPreset) {
+    setSelectedPresetId(preset.id);
+    handleBuildScenario(preset.locationName, preset.defaultPopulation);
   }
 
   const bestRoute = result.selectedRoutes[0];
 
   return (
     <section className="rounded-2xl border border-[#2b4966] bg-[#0d1b2d] p-6 shadow-2xl shadow-black/50">
-      {/* 1. SCENARIO PRESETS BAR */}
+      {/* 1. UNIFIED CHENNAI SCENARIO & LOCATION INPUT BAR */}
       <div className="border-b border-[#23354d] pb-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
               <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#39d4b4]/20 text-sm">
-                🎯
+                🌐
               </span>
               <span className="text-xs font-bold tracking-[.18em] text-[#39d4b4]">
-                PHASE 9 · SCENARIO PRESETS & MONTE CARLO INTELLIGENCE
+                DECISION TWIN & DETERMINISTIC + MONTE CARLO SIMULATION
               </span>
             </div>
             <h2 className="mt-1 text-2xl font-bold text-[#e6edf7]">
-              Chennai Emergency Scenario Presets
+              City-Scale Emergency Response & Resource Orchestration
             </h2>
             <p className="mt-0.5 text-xs text-[#9aabc1]">
-              Select any pre-configured Chennai hotspot. Coordinates, GIS layers, live rainfall, OSRM routes, and probabilistic simulations load automatically.
+              Enter ANY location in Chennai (e.g. T Nagar, Anna Nagar, Adyar...) or prompt. Calculates vehicle fleet, best route from VIT Chennai Hub, deterministic feasibility, and 1,000 Monte Carlo iterations.
             </p>
           </div>
 
@@ -267,29 +290,65 @@ export function DecisionTwinSimulationPanel({
           </div>
         </div>
 
-        {/* PRESET BUTTONS */}
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          {SCENARIO_PRESETS.map((preset) => {
-            const isSelected = twin.location.name.toLowerCase().includes(preset.locationName.toLowerCase());
-            return (
-              <button
-                key={preset.id}
-                type="button"
-                onClick={() => selectPreset(preset)}
-                disabled={loadingBackend}
-                className={`flex items-center gap-2 rounded-xl border px-4 py-2.5 text-xs font-bold transition-all ${
-                  isSelected
-                    ? "border-[#39d4b4] bg-[#39d4b4]/20 text-[#69e8d1] shadow-lg shadow-[#39d4b4]/20"
-                    : "border-[#39506e] bg-[#07111f] text-[#9aabc1] hover:border-[#39d4b4]/60 hover:text-white"
-                }`}
-              >
-                <span className="text-sm">📍</span>
-                <span>{preset.label}</span>
-                {isSelected && <span className="text-[10px] text-[#39d4b4] font-mono">ACTIVE</span>}
-              </button>
-            );
-          })}
-          {loadingBackend && <span className="text-xs text-[#39d4b4] animate-pulse">Syncing real GIS & weather…</span>}
+        {/* FREEFORM LOCATION / SCENARIO INPUT */}
+        <div className="mt-4 rounded-xl border border-[#23354d] bg-[#07111f] p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <label className="text-xs font-bold text-[#39d4b4] uppercase tracking-wider flex items-center gap-1.5">
+              <span>📍</span> ENTER ANY CHENNAI LOCATION OR EMERGENCY SCENARIO
+            </label>
+            <span className="text-[11px] text-[#9aabc1]">
+              Origin: <b>VIT Chennai Base Hub</b> (Permanent Dispatch)
+            </span>
+          </div>
+
+          <div className="mt-2 flex flex-wrap gap-2">
+            <input
+              type="text"
+              value={customLocationInput}
+              onChange={(e) => setCustomLocationInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && customLocationInput.trim()) {
+                  handleBuildScenario(customLocationInput);
+                }
+              }}
+              placeholder="e.g. T Nagar, Anna Nagar, Mylapore, Porur, or 'Severe flood in T Nagar evacuate 3000 people'..."
+              className="flex-1 min-w-[280px] rounded-xl border border-[#39506e] bg-[#10233a] px-4 py-2.5 text-sm text-white placeholder-[#5a708c] outline-none focus:border-[#39d4b4]"
+            />
+            <button
+              type="button"
+              onClick={() => handleBuildScenario(customLocationInput || "T Nagar, Chennai")}
+              disabled={loadingBackend}
+              className="flex items-center gap-2 rounded-xl bg-[#39d4b4] px-5 py-2.5 text-xs font-bold text-[#062019] transition-all hover:bg-[#2ec2a3] disabled:opacity-50 shadow-lg shadow-[#39d4b4]/20"
+            >
+              <span>{loadingBackend ? "Building Twin…" : "⚡ Build & Simulate"}</span>
+            </button>
+          </div>
+
+          {/* Quick Location Chips */}
+          <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="text-[#9aabc1] text-[11px]">Quick Hotspots:</span>
+            {["T Nagar", "Velachery", "Chennai Central", "Tambaram", "Adyar", "Anna Nagar", "Guindy", "Porur", "Mylapore"].map((place) => {
+              const isCurrent = twin.location.name.toLowerCase().includes(place.toLowerCase());
+              return (
+                <button
+                  key={place}
+                  type="button"
+                  onClick={() => {
+                    setCustomLocationInput(place);
+                    handleBuildScenario(place);
+                  }}
+                  disabled={loadingBackend}
+                  className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                    isCurrent
+                      ? "border-[#39d4b4] bg-[#39d4b4]/20 text-[#69e8d1]"
+                      : "border-[#39506e]/50 bg-[#10233a] text-[#9aabc1] hover:border-[#39d4b4]/60 hover:text-white"
+                  }`}
+                >
+                  📍 {place}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
 
@@ -327,6 +386,30 @@ export function DecisionTwinSimulationPanel({
               <span className="text-[#9aabc1] block text-[10px]">Risk Index</span>
               <span className="font-mono text-sm font-bold text-amber-300">{bestRoute?.riskScore}/100</span>
             </div>
+          </div>
+        </div>
+
+        {/* MANDATORY VEHICLE & RESCUE DIRECTIVE */}
+        <div className="mt-3 rounded-lg border border-[#39d4b4]/40 bg-[#071f25] p-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-[10px] font-bold tracking-wider text-[#39d4b4]">
+                MANDATORY RESCUE VEHICLE & ROUTE DISPATCH DIRECTIVE:
+              </p>
+              <p className="mt-1 text-sm font-bold text-white">
+                Deploy from VIT Chennai Base:{" "}
+                <span className="text-[#39d4b4]">{twin.resources.buses.value} Buses</span> ·{" "}
+                <span className="text-cyan-300">{twin.resources.boats.value} Rescue Boats</span> ·{" "}
+                <span className="text-red-300">{twin.resources.ambulances.value} Ambulances</span> ·{" "}
+                <span className="text-emerald-300">{twin.resources.rescueTeams.value} Rescue Teams</span>
+              </p>
+              <p className="mt-0.5 text-xs text-[#9aabc1]">
+                Corridor: <b>{bestRoute?.name}</b> ({bestRoute?.distanceKm} km · ~{bestRoute?.travelMinutes} min). Fleet throughput: <b>{result.singleWaveCapacity} citizens/wave</b> across <b>{result.wavesRequired} wave(s)</b>.
+              </p>
+            </div>
+            <span className="rounded-full bg-[#113c3d] px-3 py-1 text-xs font-mono font-bold text-[#69e8d1] border border-[#39d4b4]/30">
+              VIT Base → {twin.location.name}
+            </span>
           </div>
         </div>
 

@@ -8,11 +8,25 @@ import {
   createDefaultDecisionTwin,
   simulateDeterministicDecisionTwin,
   simulateScenario,
+  KNOWN_PLACES,
   type DecisionTwin,
   type SimulationResult
 } from "@/lib/decision-twin";
 
 async function resolvePlace(name: string) {
+  const lower = name.toLowerCase();
+  for (const [key, place] of Object.entries(KNOWN_PLACES)) {
+    if (new RegExp(`\\b${key}\\b`, "i").test(lower)) {
+      return {
+        name: place.label,
+        lat: place.lat,
+        lng: place.lng,
+        source: "KNOWN_PLACE_RESOLUTION",
+        status: "RESOLVED"
+      };
+    }
+  }
+
   const response = await fetch(
     `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(`${name}, Chennai, Tamil Nadu`)}`,
     {

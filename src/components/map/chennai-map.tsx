@@ -25,6 +25,18 @@ const KNOWN_DESTINATIONS: Record<string, { name: string; lng: number; lat: numbe
   madipakkam: { name: "Madipakkam, Chennai", lng: 80.1983, lat: 12.9647 },
   guindy: { name: "Guindy, Chennai", lng: 80.2026, lat: 13.0067 },
   adyar: { name: "Adyar, Chennai", lng: 80.2565, lat: 13.0012 },
+  "t nagar": { name: "T Nagar, Chennai", lng: 80.2341, lat: 13.0418 },
+  "t. nagar": { name: "T Nagar, Chennai", lng: 80.2341, lat: 13.0418 },
+  "thyagaraya nagar": { name: "T Nagar, Chennai", lng: 80.2341, lat: 13.0418 },
+  "anna nagar": { name: "Anna Nagar, Chennai", lng: 80.2101, lat: 13.0850 },
+  mylapore: { name: "Mylapore, Chennai", lng: 80.2676, lat: 13.0368 },
+  porur: { name: "Porur, Chennai", lng: 80.1565, lat: 13.0382 },
+  koyambedu: { name: "Koyambedu, Chennai", lng: 80.1948, lat: 13.0694 },
+  saidapet: { name: "Saidapet, Chennai", lng: 80.2231, lat: 13.0213 },
+  perambur: { name: "Perambur, Chennai", lng: 80.2434, lat: 13.1075 },
+  triplicane: { name: "Triplicane, Chennai", lng: 80.2757, lat: 13.0588 },
+  nungambakkam: { name: "Nungambakkam, Chennai", lng: 80.2425, lat: 13.0569 },
+  thiruvanmiyur: { name: "Thiruvanmiyur, Chennai", lng: 80.2594, lat: 12.9830 },
   kovalam: { name: "Kovalam, Chennai", lng: 80.251, lat: 12.787 },
 };
 

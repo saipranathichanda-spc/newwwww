@@ -241,7 +241,7 @@ export interface SimulationResult {
 // KNOWN CHENNAI PLACES
 // ==========================================
 
-const KNOWN_PLACES: Record<string, { label: string; lat: number; lng: number }> = {
+export const KNOWN_PLACES: Record<string, { label: string; lat: number; lng: number }> = {
   "vit chennai": { label: "VIT Chennai", lat: 12.8406, lng: 80.1534 },
   "central": { label: "Chennai Central", lat: 13.0827, lng: 80.2757 },
   "chennai central": { label: "Chennai Central", lat: 13.0827, lng: 80.2757 },
@@ -252,6 +252,18 @@ const KNOWN_PLACES: Record<string, { label: string; lat: number; lng: number }> 
   "chennai": { label: "Chennai", lat: 13.0827, lng: 80.2707 },
   "kovalam": { label: "Kovalam, Chennai", lat: 12.787, lng: 80.251 },
   "madipakkam": { label: "Madipakkam, Chennai", lat: 12.9623, lng: 80.1986 },
+  "t nagar": { label: "T Nagar, Chennai", lat: 13.0418, lng: 80.2341 },
+  "t. nagar": { label: "T Nagar, Chennai", lat: 13.0418, lng: 80.2341 },
+  "thyagaraya nagar": { label: "T Nagar, Chennai", lat: 13.0418, lng: 80.2341 },
+  "anna nagar": { label: "Anna Nagar, Chennai", lat: 13.0850, lng: 80.2101 },
+  "mylapore": { label: "Mylapore, Chennai", lat: 13.0368, lng: 80.2676 },
+  "porur": { label: "Porur, Chennai", lat: 13.0382, lng: 80.1565 },
+  "koyambedu": { label: "Koyambedu, Chennai", lat: 13.0694, lng: 80.1948 },
+  "saidapet": { label: "Saidapet, Chennai", lat: 13.0213, lng: 80.2231 },
+  "perambur": { label: "Perambur, Chennai", lat: 13.1075, lng: 80.2434 },
+  "triplicane": { label: "Triplicane, Chennai", lat: 13.0588, lng: 80.2757 },
+  "nungambakkam": { label: "Nungambakkam, Chennai", lat: 13.0569, lng: 80.2425 },
+  "thiruvanmiyur": { label: "Thiruvanmiyur, Chennai", lat: 12.9830, lng: 80.2594 },
   "sholinganallur": { label: "Sholinganallur, Chennai", lat: 12.9010, lng: 80.2279 },
   "perumbakkam": { label: "Perumbakkam, Chennai", lat: 12.8944, lng: 80.1923 },
 };

@@ -157,7 +157,7 @@ export function DecisionTwinSimulationPanel({
 
   async function handleConfirmDispatch() {
     if (!dispatchReason.trim()) {
-      setDispatchError("Please enter an operational justification for the mission audit record.");
+      setDispatchError("Please enter the operational reason.");
       return;
     }
     setDispatching(true);
@@ -165,6 +165,7 @@ export function DecisionTwinSimulationPanel({
     try {
       const res = await fetch("/api/dispatch", {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           locationName: twin.location.name,
@@ -178,6 +179,7 @@ export function DecisionTwinSimulationPanel({
           corridor: bestRoute?.name || "Primary Corridor",
           distanceKm: bestRoute?.distanceKm || 20,
           reason: dispatchReason.trim(),
+          operationalRationale: dispatchReason.trim(),
         }),
       });
       const data = await res.json();
@@ -1782,7 +1784,7 @@ export function DecisionTwinSimulationPanel({
               </button>
               <button
                 type="button"
-                disabled={dispatching || !dispatchReason.trim()}
+                disabled={dispatching}
                 onClick={handleConfirmDispatch}
                 className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-[#39d4b4] to-[#2db397] px-5 py-2.5 text-xs font-bold text-[#062019] shadow-lg shadow-[#39d4b4]/30 hover:scale-105 active:scale-95 disabled:opacity-50"
               >

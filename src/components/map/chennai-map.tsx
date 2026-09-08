@@ -43,6 +43,30 @@ const KNOWN_DESTINATIONS: Record<string, { name: string; lng: number; lat: numbe
 const MAPLIBRE_CSS = "https://unpkg.com/maplibre-gl@5.6.2/dist/maplibre-gl.css";
 const MAPLIBRE_JS = "https://unpkg.com/maplibre-gl@5.6.2/dist/maplibre-gl.js";
 const BASEMAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
+const FALLBACK_OSM_STYLE = {
+  version: 8,
+  sources: {
+    "osm-raster-tiles": {
+      type: "raster",
+      tiles: [
+        "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      ],
+      tileSize: 256,
+      attribution: "© OpenStreetMap contributors",
+    },
+  },
+  layers: [
+    {
+      id: "osm-raster-layer",
+      type: "raster",
+      source: "osm-raster-tiles",
+      minzoom: 0,
+      maxzoom: 19,
+    },
+  ],
+};
 
 type SelectedPlace = { name: string; lng: number; lat: number };
 const LAYERS: Array<{ key: GccLayerKey; label: string; color: string }> = [
@@ -87,6 +111,10 @@ export function ChennaiMap({
   const [enabledLayers, setEnabledLayers] = useState<GccLayerKey[]>(["roads", "drains", "rivers"]);
   const [loadingLayers, setLoadingLayers] = useState(false);
   const [mapReady, setMapReady] = useState(false);
+  const [mapLoading, setMapLoading] = useState(true);
+  const [mapError, setMapError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const [lastTelemetryUpdate, setLastTelemetryUpdate] = useState<string>(() => new Date().toLocaleTimeString());
   const [radiusKm, setRadiusKm] = useState(10);
   const [routes, setRoutes] = useState<RouteOption[]>([]);
   const [routingStatus, setRoutingStatus] = useState("Calculating route from VIT Chennai Base…");
@@ -401,26 +429,82 @@ export function ChennaiMap({
     return () => { cancelled = true; };
   }, [destination]);
 
-  // Initialize MapLibre
+  // Initialize MapLibre with fallback, retry, and ResizeObserver
   useEffect(() => {
     let isCancelled = false;
+    let styleTimeout: any = null;
+    let resizeObserver: ResizeObserver | null = null;
 
     function initMap() {
-      if (isCancelled || !mapNode.current || !window.maplibregl || mapRef.current) return;
-      const map = new window.maplibregl.Map({
-        container: mapNode.current,
-        style: BASEMAP_STYLE,
-        center: [VIT_CHENNAI.lng, VIT_CHENNAI.lat],
-        zoom: 11,
-        attributionControl: true,
-      });
-      map.addControl(new window.maplibregl.NavigationControl(), "top-right");
-      map.on("load", () => {
-        if (isCancelled) return;
-        setMapReady(true);
-        resolveAndRoute(destinationInput);
-      });
-      mapRef.current = map;
+      if (isCancelled || !mapNode.current || !window.maplibregl) return;
+      if (mapRef.current) {
+        try {
+          mapRef.current.remove();
+        } catch {}
+        mapRef.current = null;
+      }
+
+      setMapLoading(true);
+      setMapError(null);
+
+      try {
+        const map = new window.maplibregl.Map({
+          container: mapNode.current,
+          style: BASEMAP_STYLE,
+          center: [destination.lng, destination.lat],
+          zoom: 11,
+          attributionControl: true,
+        });
+
+        styleTimeout = setTimeout(() => {
+          if (!isCancelled && mapRef.current && !mapRef.current.isStyleLoaded()) {
+            console.warn("[MapLibre] Vector style timeout, switching to OSM raster tiles fallback");
+            try {
+              mapRef.current.setStyle(FALLBACK_OSM_STYLE as any);
+            } catch (err) {
+              console.error("[MapLibre] Fallback style error:", err);
+            }
+          }
+        }, 5000);
+
+        map.on("error", (e: any) => {
+          console.warn("[MapLibre] Map tile/style warning:", e?.error?.message || e);
+          if (!isCancelled && mapRef.current && !mapRef.current.isStyleLoaded()) {
+            try {
+              mapRef.current.setStyle(FALLBACK_OSM_STYLE as any);
+            } catch {
+              setMapError("Vector tile server unreachable. Telemetry fallback active.");
+              setMapLoading(false);
+            }
+          }
+        });
+
+        map.on("load", () => {
+          if (styleTimeout) clearTimeout(styleTimeout);
+          if (isCancelled) return;
+          setMapLoading(false);
+          setMapReady(true);
+          setMapError(null);
+          setLastTelemetryUpdate(new Date().toLocaleTimeString());
+          resolveAndRoute(destinationInput);
+        });
+
+        map.addControl(new window.maplibregl.NavigationControl(), "top-right");
+        mapRef.current = map;
+
+        if (typeof ResizeObserver !== "undefined" && mapNode.current) {
+          resizeObserver = new ResizeObserver(() => {
+            if (mapRef.current) {
+              mapRef.current.resize();
+            }
+          });
+          resizeObserver.observe(mapNode.current);
+        }
+      } catch (err: any) {
+        console.error("[MapLibre] Initialization error:", err);
+        setMapError("Map WebGL canvas failed to initialize. Displaying direct telemetry.");
+        setMapLoading(false);
+      }
     }
 
     if (!document.querySelector(`link[href="${MAPLIBRE_CSS}"]`)) {
@@ -439,6 +523,10 @@ export function ChennaiMap({
       script.onload = () => {
         initMap();
       };
+      script.onerror = () => {
+        setMapLoading(false);
+        setMapError("Failed to load MapLibre library. Direct telemetry fallback active.");
+      };
       document.head.appendChild(script);
     } else {
       const checkInterval = setInterval(() => {
@@ -450,6 +538,8 @@ export function ChennaiMap({
       return () => {
         isCancelled = true;
         clearInterval(checkInterval);
+        if (styleTimeout) clearTimeout(styleTimeout);
+        if (resizeObserver) resizeObserver.disconnect();
         mapRef.current?.remove();
         mapRef.current = null;
         setMapReady(false);
@@ -458,12 +548,14 @@ export function ChennaiMap({
 
     return () => {
       isCancelled = true;
+      if (styleTimeout) clearTimeout(styleTimeout);
+      if (resizeObserver) resizeObserver.disconnect();
       mapRef.current?.remove();
       mapRef.current = null;
       setMapReady(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [retryCount]);
 
   function handleFormSubmit(e: FormEvent) {
     e.preventDefault();
@@ -638,20 +730,116 @@ export function ChennaiMap({
       </div>
 
       {/* Map View */}
-      <div className="relative h-[480px] bg-[#10233a]">
-        <div ref={mapNode} className="h-full w-full" />
-        <div className="absolute bottom-5 left-5 max-w-xs rounded-xl border border-[#39506e] bg-[#07111f]/95 p-4 shadow-xl">
-          <p className="text-xs font-medium tracking-[.12em] text-[#39d4b4]">ORIGIN → DESTINATION</p>
+      <div className="relative h-[480px] min-h-[480px] w-full bg-[#10233a] overflow-hidden">
+        <div
+          ref={mapNode}
+          className="h-full w-full min-h-[480px]"
+          style={{ minHeight: "480px", width: "100%", height: "480px" }}
+        />
+
+        {/* Loading Overlay */}
+        {mapLoading && (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-[#07111f]/85 backdrop-blur-sm p-6 text-center">
+            <div className="h-10 w-10 animate-spin rounded-full border-4 border-[#39d4b4] border-t-transparent mb-3" />
+            <p className="text-sm font-bold text-white">Initializing MapLibre & Chennai GIS Engine…</p>
+            <p className="text-xs text-[#9aabc1] mt-1">Connecting to OpenFreeMap / OpenStreetMap tile networks</p>
+          </div>
+        )}
+
+        {/* Map Error Banner & Retry Button */}
+        {mapError && (
+          <div className="absolute top-4 left-4 right-4 z-30 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-500/50 bg-[#1e0a0a]/90 p-3 shadow-2xl backdrop-blur-md">
+            <div className="flex items-center gap-2">
+              <span className="text-lg">⚠️</span>
+              <div>
+                <p className="text-xs font-bold text-red-200">Map Visual Layer Notice</p>
+                <p className="text-[11px] text-red-300/80">{mapError}</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setMapError(null);
+                setMapLoading(true);
+                setRetryCount((c) => c + 1);
+              }}
+              className="rounded-lg bg-red-600/80 px-3 py-1.5 text-xs font-bold text-white hover:bg-red-500 transition shadow"
+            >
+              🔄 Retry Map
+            </button>
+          </div>
+        )}
+
+        {/* Origin & Destination Floating Badge */}
+        <div className="absolute bottom-5 left-5 max-w-xs rounded-xl border border-[#39506e] bg-[#07111f]/95 p-4 shadow-xl z-10 backdrop-blur-sm">
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <p className="text-xs font-medium tracking-[.12em] text-[#39d4b4]">ORIGIN → DESTINATION</p>
+            <button
+              type="button"
+              onClick={() => setRetryCount((c) => c + 1)}
+              className="text-[10px] text-[#9aabc1] hover:text-[#39d4b4] underline"
+            >
+              Reload Map
+            </button>
+          </div>
           <p className="mt-1 text-xs text-[#e6edf7]">
             <b>Base:</b> VIT Chennai <span className="font-mono text-[11px] text-[#9aabc1]">(12.8406, 80.1534)</span>
           </p>
           <p className="mt-1 text-xs text-[#e6edf7]">
-            <b>Incident:</b> {destination.name}
+            <b>Incident:</b> {destination.name} <span className="font-mono text-[11px] text-[#9aabc1]">({destination.lat.toFixed(4)}, {destination.lng.toFixed(4)})</span>
           </p>
           <p className="mt-2 text-xs leading-5 text-[#9aabc1]">
             Showing direct corridor route from VIT Chennai response center to the flood site.
           </p>
         </div>
+      </div>
+
+      {/* Comprehensive Production Text Fallback Section (Guarantees application usability without visual map) */}
+      <div className="border-t border-[#23354d] bg-[#07111f] p-4 text-xs text-[#e6edf7]">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-[#39d4b4]" />
+            <span className="font-bold tracking-wide text-xs text-[#69e8d1]">MISSION TELEMETRY & ROUTE SUMMARY (OFFLINE CAPABLE)</span>
+          </div>
+          <span className="text-[11px] text-[#9aabc1]">Last Synced: <b className="text-white">{lastTelemetryUpdate}</b></span>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4">
+          <div className="rounded-xl border border-[#1b2b40] bg-[#0d1b2d] p-3">
+            <p className="text-[10px] font-semibold tracking-wider text-[#9aabc1] uppercase">Fixed Dispatch Base</p>
+            <p className="mt-1 font-bold text-white">VIT Chennai Hub</p>
+            <p className="font-mono text-[11px] text-[#39d4b4]">12.8406° N, 80.1534° E</p>
+          </div>
+
+          <div className="rounded-xl border border-[#1b2b40] bg-[#0d1b2d] p-3">
+            <p className="text-[10px] font-semibold tracking-wider text-[#9aabc1] uppercase">Incident Destination</p>
+            <p className="mt-1 font-bold text-white truncate" title={destination.name}>{destination.name}</p>
+            <p className="font-mono text-[11px] text-[#ff7d7d]">{destination.lat.toFixed(4)}° N, {destination.lng.toFixed(4)}° E</p>
+          </div>
+
+          <div className="rounded-xl border border-[#1b2b40] bg-[#0d1b2d] p-3">
+            <p className="text-[10px] font-semibold tracking-wider text-[#9aabc1] uppercase">Corridor Distance & ETA</p>
+            <p className="mt-1 font-bold text-white">
+              {activeRoutes.length > 0 ? `${(activeRoutes[selectedSimulationRouteIndex || 0]?.distanceMeters / 1000).toFixed(1)} km` : "Calculating route…"}
+            </p>
+            <p className="text-[11px] text-[#f6c85f]">
+              {activeRoutes.length > 0 ? `~${Math.round(activeRoutes[selectedSimulationRouteIndex || 0]?.durationSeconds / 60)} min travel time` : "OSRM engine standby"}
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-[#1b2b40] bg-[#0d1b2d] p-3">
+            <p className="text-[10px] font-semibold tracking-wider text-[#9aabc1] uppercase">Emergency Relief & Help</p>
+            <p className="mt-1 font-bold text-[#39d4b4]">GCC Helpline: 1913</p>
+            <p className="text-[11px] text-[#9aabc1]">Disaster Control: 1070</p>
+          </div>
+        </div>
+
+        {mapError && (
+          <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 text-amber-200 text-[11px] flex items-center gap-2">
+            <span>ℹ️</span>
+            <span>Visual map tiles degraded, but all spatial coordinates, distance calculations, and dispatch authorizations remain 100% operational.</span>
+          </div>
+        )}
       </div>
     </section>
   );

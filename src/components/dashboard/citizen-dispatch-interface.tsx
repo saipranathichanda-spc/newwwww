@@ -37,7 +37,7 @@ export function CitizenDispatchInterface({
   async function handleConfirmCitizenDispatch() {
     if (!selectedReport) return;
     if (!dispatchReason.trim()) {
-      setDispatchError("Operational reason is required for dispatch authorization.");
+      setDispatchError("Please enter the operational reason.");
       return;
     }
     setDispatching(true);
@@ -46,6 +46,7 @@ export function CitizenDispatchInterface({
       const dispatch = calculateDispatchVehicles(selectedReport);
       const res = await fetch("/api/dispatch", {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           locationName: selectedReport.location.name,
@@ -54,6 +55,7 @@ export function CitizenDispatchInterface({
           corridor: "VIT Chennai Base → Radial Elevation Corridor",
           distanceKm: selectedReport.distanceKm || 18,
           reason: dispatchReason.trim(),
+          operationalRationale: dispatchReason.trim(),
         }),
       });
       if (res.ok) {
@@ -517,7 +519,7 @@ export function CitizenDispatchInterface({
               <button
                 type="button"
                 onClick={handleConfirmCitizenDispatch}
-                disabled={dispatching || !dispatchReason.trim()}
+                disabled={dispatching}
                 className="rounded-xl bg-[#39d4b4] px-5 py-2 text-xs font-bold text-[#062019] hover:bg-[#69e8d1] disabled:opacity-50 transition shadow"
               >
                 {dispatching ? "Authorizing & Logging…" : "Confirm & Dispatch Fleet"}

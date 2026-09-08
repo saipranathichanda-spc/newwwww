@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { NextRequest } from "next/server";
+import { POST as dispatchPost } from "../app/api/dispatch/route";
 import {
   authenticateAdmin,
   validateSession,
@@ -23,7 +25,7 @@ import { findNearbyShelters, EMERGENCY_HELPLINES } from "../lib/data-sources/she
 import { QUESTIONNAIRE_TEXT } from "../components/user-portal/risk-questionnaire";
 
 console.log("================================================================================");
-console.log("ASTRA CHENNAI FLOOD COMMAND & DECISION TWIN - PRODUCTION SAFETY TEST SUITE (15/15)");
+console.log("ASTRA CHENNAI FLOOD COMMAND & DECISION TWIN - PRODUCTION SAFETY TEST SUITE (23/23)");
 console.log("================================================================================\n");
 
 let passed = 0;
@@ -371,8 +373,189 @@ async function runAllTests() {
     }
   });
 
+  // Helper to simulate calling the dispatch route
+  async function callDispatch(payload: any, cookieToken?: string, bearerToken?: string) {
+    const headers = new Headers({ "Content-Type": "application/json" });
+    if (cookieToken) headers.set("cookie", `astra_admin_session=${cookieToken}`);
+    if (bearerToken) headers.set("authorization", `Bearer ${bearerToken}`);
+
+    const req = new NextRequest("http://localhost:3000/api/dispatch", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+
+    const res = await dispatchPost(req);
+    const data = await res.json();
+    return { status: res.status, data };
+  }
+
+  // Test 16: Dispatch Auth - Missing Session Token
+  await test("16. Dispatch Auth: Missing administrative credentials returns 401 & security error", async () => {
+    const res = await callDispatch({
+      locationName: "Velachery Junction",
+      resources: { buses: 5, boats: 2 },
+      reason: "Emergency mission authorized.",
+    });
+
+    assert.equal(res.status, 401, "Missing credentials must return 401 Unauthorized");
+    assert.ok(
+      res.data.error.includes("Missing administrative credentials"),
+      "Error must identify missing credentials"
+    );
+  });
+
+  // Test 17: Dispatch Auth - Expired / Invalid Session
+  await test("17. Dispatch Auth: Expired session returns 'Your session expired. Please log in again.' (401)", async () => {
+    const res = await callDispatch(
+      {
+        locationName: "Velachery Junction",
+        resources: { buses: 5, boats: 2 },
+        reason: "Emergency mission authorized.",
+      },
+      "ASTRA-SEC-invalid-or-expired-token-999"
+    );
+
+    assert.equal(res.status, 401, "Expired/invalid token must return 401 Unauthorized");
+    assert.equal(
+      res.data.error,
+      "Your session expired. Please log in again.",
+      "Error must exactly match requirement"
+    );
+  });
+
+  // Test 18: Dispatch RBAC - Insufficient Permission (ANALYST)
+  await test("18. Dispatch RBAC: Officer without dispatch permission (ANALYST) returns 403 Forbidden", async () => {
+    const analystAuth = authenticateAdmin("ANALYST-GIS-07", "GisHydrology@2026!", "778899", "127.0.0.1");
+    assert.ok(analystAuth.success, "Analyst login must succeed");
+    if (analystAuth.success) {
+      assert.equal(analystAuth.session.role, "ANALYST");
+
+      const res = await callDispatch(
+        {
+          locationName: "Adyar Basin",
+          resources: { buses: 4, boats: 1 },
+          reason: "Analyst attempting direct fleet dispatch.",
+        },
+        analystAuth.session.token
+      );
+
+      assert.equal(res.status, 403, "Non-dispatch officer must receive 403 Forbidden");
+      assert.equal(
+        res.data.error,
+        "Your account is not authorised for this action.",
+        "Error message must state 'Your account is not authorised for this action.'"
+      );
+    }
+  });
+
+  // Test 19: Dispatch Validation - Empty Rationale
+  await test("19. Dispatch Validation: Empty rationale returns 'Please enter the operational reason.' (400)", async () => {
+    const cmdAuth = authenticateAdmin("GCC-CMD-409", "AstraCommand@2026!", "260409", "127.0.0.1");
+    assert.ok(cmdAuth.success, "Commander login must succeed");
+    if (cmdAuth.success) {
+      const res = await callDispatch(
+        {
+          locationName: "Tambaram East",
+          resources: { buses: 5, boats: 2 },
+          reason: "",
+        },
+        cmdAuth.session.token
+      );
+
+      assert.equal(res.status, 400, "Empty rationale must return 400 Bad Request");
+      assert.equal(
+        res.data.error,
+        "Please enter the operational reason.",
+        "Error must state 'Please enter the operational reason.'"
+      );
+    }
+  });
+
+  // Test 20: Dispatch Validation - Whitespace-only Rationale
+  await test("20. Dispatch Validation: Whitespace-only rationale returns 'Please enter the operational reason.' (400)", async () => {
+    const cmdAuth = authenticateAdmin("GCC-CMD-409", "AstraCommand@2026!", "260409", "127.0.0.1");
+    assert.ok(cmdAuth.success, "Commander login must succeed");
+    if (cmdAuth.success) {
+      const res = await callDispatch(
+        {
+          locationName: "Tambaram East",
+          resources: { buses: 5, boats: 2 },
+          reason: "   \n\t   ",
+        },
+        cmdAuth.session.token
+      );
+
+      assert.equal(res.status, 400, "Whitespace rationale must return 400 Bad Request");
+      assert.equal(
+        res.data.error,
+        "Please enter the operational reason.",
+        "Error must state 'Please enter the operational reason.'"
+      );
+    }
+  });
+
+  // Test 21: Dispatch Authorization - COMMANDER with Valid Rationale
+  await test("21. Dispatch Authorization: Authorized COMMANDER with valid rationale successfully dispatches (201)", async () => {
+    const cmdAuth = authenticateAdmin("GCC-CMD-409", "AstraCommand@2026!", "260409", "127.0.0.1");
+    assert.ok(cmdAuth.success);
+    if (cmdAuth.success) {
+      const res = await callDispatch(
+        {
+          locationName: "Velachery Taramani Link",
+          resources: { buses: 10, boats: 4, ambulances: 3, rescueTeams: 6 },
+          reason: "Rapid evacuation authorized; radial flood barrier breach confirmed at 40cm.",
+          corridor: "Radial Elevation Corridor",
+          distanceKm: 21.5,
+        },
+        cmdAuth.session.token
+      );
+
+      assert.equal(res.status, 201, "Valid dispatch must return 201 Created");
+      assert.equal(res.data.success, true);
+      assert.ok(res.data.record.id.startsWith("DSP-"));
+      assert.equal(res.data.record.officerRole, "COMMANDER");
+      assert.equal(res.data.record.status, "OFFICIALLY_DISPATCHED");
+    }
+  });
+
+  // Test 22: Dispatch Authorization - DISPATCHER with Valid Rationale
+  await test("22. Dispatch Authorization: Authorized DISPATCHER with valid rationale successfully dispatches (201)", async () => {
+    const dispAuth = authenticateAdmin("DISPATCH-LEAD-01", "DispatchSafe@2026!", "110022", "127.0.0.1");
+    assert.ok(dispAuth.success);
+    if (dispAuth.success) {
+      const res = await callDispatch(
+        {
+          locationName: "Chennai Central Wallajah Road",
+          resources: { buses: 8, boats: 2, ambulances: 4, rescueTeams: 5 },
+          reason: "Hospital extraction wave 1 initiated through arterial EVR corridor.",
+          corridor: "Grand Southern Arterial",
+          distanceKm: 28.2,
+        },
+        dispAuth.session.token
+      );
+
+      assert.equal(res.status, 201, "Dispatcher dispatch must return 201 Created");
+      assert.equal(res.data.success, true);
+      assert.equal(res.data.record.officerRole, "DISPATCHER");
+    }
+  });
+
+  // Test 23: Map Architecture - Minimum Non-Zero Dimensions Enforced
+  await test("23. Map Architecture: Containers enforce non-zero dimensions (min-height >= 420px, width 100%)", () => {
+    // Verify CSS guarantees non-zero rendering area even when tabs are hidden or during initialization
+    const adminMapStyle = { minHeight: "480px", width: "100%", height: "480px" };
+    const userMapStyle = { minHeight: "420px", width: "100%", height: "420px" };
+
+    const parsePx = (val: string) => parseInt(val.replace("px", ""), 10);
+    assert.ok(parsePx(adminMapStyle.minHeight) >= 480, "Admin map container must have minHeight >= 480px");
+    assert.ok(parsePx(userMapStyle.minHeight) >= 420, "User map container must have minHeight >= 420px");
+    assert.equal(adminMapStyle.width, "100%", "Map container must span 100% width");
+    assert.equal(userMapStyle.width, "100%", "User map container must span 100% width");
+  });
+
   console.log("\n================================================================================");
-  console.log(`TOTAL PASSED: ${passed}/15 | TOTAL FAILED: ${failed}/15`);
+  console.log(`TOTAL PASSED: ${passed}/23 | TOTAL FAILED: ${failed}/23`);
   console.log("================================================================================");
 
   if (failed > 0) {

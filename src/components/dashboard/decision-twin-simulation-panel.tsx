@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import {
   type DecisionTwin,
   type SimulationResult,
@@ -9,8 +9,23 @@ import {
   simulateDeterministicDecisionTwin,
   updateDecisionTwinResources,
   updateDecisionTwinPriorities,
+  updateDecisionTwinRoadClosure,
+  updateDecisionTwinWeatherDelta,
   normalizePriorities
 } from "@/lib/decision-twin";
+import {
+  SCENARIO_PRESETS,
+  getScenarioPreset,
+  resolveBestDestination,
+  type ScenarioPreset,
+  type VerifiedDestination
+} from "@/lib/scenario-presets";
+import {
+  runMonteCarloSimulation,
+  getDefaultUncertainties,
+  type ProbabilisticSimulationResult,
+  type UncertaintyVariable
+} from "@/lib/probabilistic-simulation";
 
 interface DecisionTwinSimulationPanelProps {
   initialPlace?: string;
@@ -23,73 +38,88 @@ export function DecisionTwinSimulationPanel({
   onDecisionTwinChange,
   onSelectRoute
 }: DecisionTwinSimulationPanelProps) {
-  // Preset scenarios
-  const PRESETS = [
-    {
-      label: "Velachery Flood (Acceptance Test)",
-      place: "Velachery, Chennai",
-      pop: 3500,
-      buses: 10,
-      boats: 3,
-      ambulances: 5,
-      teams: 20,
-      budget: 100000,
-      priorities: { safety: 60, speed: 30, cost: 10, coverage: 0, reliability: 0 }
-    },
-    {
-      label: "Chennai Central Transit Corridor",
-      place: "Chennai Central",
-      pop: 5000,
-      buses: 12,
-      boats: 2,
-      ambulances: 6,
-      teams: 25,
-      budget: 150000,
-      priorities: { safety: 50, speed: 40, cost: 10, coverage: 0, reliability: 0 }
-    },
-    {
-      label: "Tambaram High Ground Basin",
-      place: "Tambaram, Chennai",
-      pop: 4200,
-      buses: 8,
-      boats: 4,
-      ambulances: 4,
-      teams: 18,
-      budget: 120000,
-      priorities: { safety: 70, speed: 20, cost: 10, coverage: 0, reliability: 0 }
-    }
-  ];
+  // Active Preset Selection
+  const [selectedPresetId, setSelectedPresetId] = useState<string>("velachery-flood");
 
-  // Active Decision Twin State
-  const [twin, setTwin] = useState<DecisionTwin>(() =>
-    createDefaultDecisionTwin({
-      placeName: "Velachery, Chennai",
-      lat: 12.9815,
-      lng: 80.218,
-      population: 3500,
-      buses: 10,
-      boats: 3,
-      ambulances: 5,
-      rescueTeams: 20,
-      budget: 100000,
-      priorities: { safety: 60, speed: 30, cost: 10, coverage: 0, reliability: 0 }
-    })
-  );
+  // Active Decision Twin State (initialized with Velachery Flood preset)
+  const [twin, setTwin] = useState<DecisionTwin>(() => {
+    const preset = SCENARIO_PRESETS[0];
+    return createDefaultDecisionTwin({
+      placeName: preset.locationName,
+      lat: preset.coords.lat,
+      lng: preset.coords.lng,
+      population: preset.defaultPopulation,
+      buses: preset.defaultResources.buses,
+      boats: preset.defaultResources.boats,
+      ambulances: preset.defaultResources.ambulances,
+      rescueTeams: preset.defaultResources.rescueTeams,
+      budget: preset.defaultResources.budget,
+      priorities: preset.defaultPriorities
+    });
+  });
+
+  // Dynamic Destination Selection
+  const currentPreset = useMemo(() => {
+    return getScenarioPreset(twin.location.name) || SCENARIO_PRESETS[0];
+  }, [twin.location.name]);
+
+  const bestDestinationInfo = useMemo(() => {
+    return resolveBestDestination(currentPreset, twin.priorities);
+  }, [currentPreset, twin.priorities]);
 
   // Deterministic Simulation result (pure client recalculation in 0ms)
   const result: SimulationResult = useMemo(() => {
     return simulateDeterministicDecisionTwin(twin);
   }, [twin]);
 
-  // Sync to parent when twin or result updates
+  // Phase 9: Monte Carlo Probabilistic Simulation State
+  const [mcIterations, setMcIterations] = useState<100 | 500 | 1000 | 5000>(1000);
+  const [mcSeed, setMcSeed] = useState<number>(424242);
+  const [uncertainties, setUncertainties] = useState<Record<string, UncertaintyVariable>>(() =>
+    getDefaultUncertainties(twin)
+  );
+
+  // Dynamic Re-evaluation Scenario Toggles
+  const [isSurgeRainfall, setIsSurgeRainfall] = useState(false);
+  const [isRoute1Closed, setIsRoute1Closed] = useState(false);
+
+  // Probabilistic Simulation Result
+  const [probResult, setProbResult] = useState<ProbabilisticSimulationResult>(() =>
+    runMonteCarloSimulation(twin, {
+      iterations: 1000,
+      seed: 424242,
+      uncertainties: getDefaultUncertainties(twin)
+    })
+  );
+
+  // Re-run Monte Carlo when deterministic twin, iterations, or seed change
+  const executeMonteCarlo = useCallback(
+    (targetTwin: DecisionTwin, iters = mcIterations, seedVal = mcSeed, uncerts = uncertainties) => {
+      const res = runMonteCarloSimulation(targetTwin, {
+        iterations: iters,
+        seed: seedVal,
+        uncertainties: uncerts
+      });
+      setProbResult(res);
+    },
+    [mcIterations, mcSeed, uncertainties]
+  );
+
+  // Keep uncertainties in sync with twin population
+  useEffect(() => {
+    setUncertainties(getDefaultUncertainties(twin));
+    executeMonteCarlo(twin, mcIterations, mcSeed);
+  }, [twin, executeMonteCarlo, mcIterations, mcSeed]);
+
+  // Sync to parent dashboard & map
   useEffect(() => {
     onDecisionTwinChange?.(twin, result);
   }, [twin, result, onDecisionTwinChange]);
 
-  const [activeTab, setActiveTab] = useState<"simulation" | "decision-twin" | "routes" | "transparency">("simulation");
+  const [activeTab, setActiveTab] = useState<"deterministic" | "probabilistic" | "routes" | "twin-spec" | "transparency">("probabilistic");
   const [selectedRouteIdx, setSelectedRouteIdx] = useState(0);
   const [loadingBackend, setLoadingBackend] = useState(false);
-  const [customPrompt, setCustomPrompt] = useState("");
+  const [isAssumptionsExpanded, setIsAssumptionsExpanded] = useState(false);
 
   // What-If handler: Instant resource changes
   function handleResourceChange(key: "buses" | "boats" | "ambulances" | "rescueTeams" | "budget", value: number) {
@@ -100,7 +130,6 @@ export function DecisionTwinSimulationPanel({
   // What-If handler: Priority changes
   function handlePriorityChange(key: keyof PrioritiesWeights, value: number) {
     const nextPriorities = { ...twin.priorities, [key]: Math.max(0, Math.min(100, value)) };
-    // Auto-normalize so sum is 100%
     const normalized = normalizePriorities(nextPriorities);
     const updated = updateDecisionTwinPriorities(twin, normalized);
     setTwin(updated);
@@ -116,112 +145,238 @@ export function DecisionTwinSimulationPanel({
     setTwin(updateDecisionTwinPriorities(twin, p));
   }
 
-  // Fetch real GIS, weather & routes from backend for a specific place
-  async function loadScenarioFromBackend(placeName: string, pop = 3500, buses = 10, boats = 3, ambulances = 5) {
+  // Dynamic Route Re-evaluation: Toggle Road Closure
+  function toggleRouteClosure() {
+    const nextState = !isRoute1Closed;
+    setIsRoute1Closed(nextState);
+    const closures = nextState ? ["Route 1 GST / Arterial Canal Bridge Inundated"] : [];
+    const updated = updateDecisionTwinRoadClosure(twin, closures);
+    setTwin(updated);
+  }
+
+  // Dynamic Route Re-evaluation: Toggle +30% Rainfall Surge
+  function toggleRainfallSurge() {
+    const nextState = !isSurgeRainfall;
+    setIsSurgeRainfall(nextState);
+    const multiplier = nextState ? 1.3 : 1.0;
+    const updated = updateDecisionTwinWeatherDelta(twin, multiplier);
+    setTwin(updated);
+  }
+
+  // Re-roll Monte Carlo Seed
+  function handleRerollSeed() {
+    const newSeed = Math.floor(Math.random() * 900000) + 100000;
+    setMcSeed(newSeed);
+    executeMonteCarlo(twin, mcIterations, newSeed);
+  }
+
+  // Automatic Scenario Preset Loader (1-Click)
+  async function selectPreset(preset: ScenarioPreset) {
+    setSelectedPresetId(preset.id);
     setLoadingBackend(true);
+    setIsRoute1Closed(false);
+    setIsSurgeRainfall(false);
+
     try {
       const res = await fetch("/api/decision/build", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          place: placeName,
-          population: pop,
-          buses,
-          boats,
-          ambulances,
-          budget: twin.resources.budget.value,
-          priorities: twin.priorities
+          place: preset.locationName,
+          population: preset.defaultPopulation,
+          buses: preset.defaultResources.buses,
+          boats: preset.defaultResources.boats,
+          ambulances: preset.defaultResources.ambulances,
+          rescueTeams: preset.defaultResources.rescueTeams,
+          budget: preset.defaultResources.budget,
+          priorities: preset.defaultPriorities
         })
       });
+
       if (res.ok) {
         const data = await res.json();
         if (data.decisionTwin) {
           setTwin(data.decisionTwin);
+          executeMonteCarlo(data.decisionTwin, mcIterations, mcSeed);
+          return;
         }
       }
+
+      // Fallback local creation if network offline
+      const fallbackTwin = createDefaultDecisionTwin({
+        placeName: preset.locationName,
+        lat: preset.coords.lat,
+        lng: preset.coords.lng,
+        population: preset.defaultPopulation,
+        buses: preset.defaultResources.buses,
+        boats: preset.defaultResources.boats,
+        ambulances: preset.defaultResources.ambulances,
+        rescueTeams: preset.defaultResources.rescueTeams,
+        budget: preset.defaultResources.budget,
+        priorities: preset.defaultPriorities
+      });
+      setTwin(fallbackTwin);
+      executeMonteCarlo(fallbackTwin, mcIterations, mcSeed);
     } catch (e) {
-      console.error("Failed to load backend scenario data", e);
+      console.error("Failed to fetch preset scenario from backend", e);
     } finally {
       setLoadingBackend(false);
     }
   }
 
-  // On mount, pull live backend data for default location
-  useEffect(() => {
-    loadScenarioFromBackend("Velachery, Chennai", 3500, 10, 3, 5);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const bestRoute = result.selectedRoutes[0];
 
   return (
     <section className="rounded-2xl border border-[#2b4966] bg-[#0d1b2d] p-6 shadow-2xl shadow-black/50">
-      {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#23354d] pb-5">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#39d4b4]/20 text-sm">
-              ⚙️
+      {/* 1. SCENARIO PRESETS BAR */}
+      <div className="border-b border-[#23354d] pb-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#39d4b4]/20 text-sm">
+                🎯
+              </span>
+              <span className="text-xs font-bold tracking-[.18em] text-[#39d4b4]">
+                PHASE 9 · SCENARIO PRESETS & MONTE CARLO INTELLIGENCE
+              </span>
+            </div>
+            <h2 className="mt-1 text-2xl font-bold text-[#e6edf7]">
+              Chennai Emergency Scenario Presets
+            </h2>
+            <p className="mt-0.5 text-xs text-[#9aabc1]">
+              Select any pre-configured Chennai hotspot. Coordinates, GIS layers, live rainfall, OSRM routes, and probabilistic simulations load automatically.
+            </p>
+          </div>
+
+          {/* Feasibility & Score Badges */}
+          <div className="flex items-center gap-2.5">
+            <span
+              className={`flex items-center gap-1.5 rounded-full px-3 py-1 font-mono text-xs font-bold ${
+                result.feasible
+                  ? "border border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                  : "border border-red-500/40 bg-red-500/10 text-red-300 animate-pulse"
+              }`}
+            >
+              <span className={`h-2 w-2 rounded-full ${result.feasible ? "bg-emerald-400" : "bg-red-400"}`} />
+              {result.feasible ? "FEASIBLE" : "CONSTRAINTS EXCEEDED"}
             </span>
-            <span className="text-xs font-bold tracking-[.18em] text-[#39d4b4]">
-              PHASE 8 · DECISION TWIN & DETERMINISTIC SIMULATION
+
+            <span className="rounded-full border border-[#39d4b4]/40 bg-[#113c3d] px-3 py-1 font-mono text-xs font-bold text-[#69e8d1]">
+              Score: {result.score}/100
             </span>
           </div>
-          <h2 className="mt-1.5 text-2xl font-bold text-[#e6edf7]">
-            {twin.location.name} — Real-Time Emergency Engine
-          </h2>
-          <p className="mt-0.5 text-xs text-[#9aabc1]">
-            Mathematical simulation engine (100% deterministic) evaluating wave evacuation times, fleet capacities, OSRM road corridors, and bottlenecks.
-          </p>
         </div>
 
-        {/* Status Indicators */}
-        <div className="flex flex-wrap items-center gap-2.5">
-          <span
-            className={`flex items-center gap-1.5 rounded-full px-3 py-1 font-mono text-xs font-bold ${
-              result.feasible
-                ? "border border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                : "border border-red-500/40 bg-red-500/10 text-red-300 animate-pulse"
-            }`}
-          >
-            <span className={`h-2 w-2 rounded-full ${result.feasible ? "bg-emerald-400" : "bg-red-400"}`} />
-            {result.feasible ? "FEASIBLE" : "INFEASIBLE"}
-          </span>
-
-          <span className="rounded-full border border-[#39d4b4]/40 bg-[#113c3d] px-3.5 py-1 font-mono text-xs font-bold text-[#69e8d1]">
-            Score: {result.score}/100
-          </span>
+        {/* PRESET BUTTONS */}
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {SCENARIO_PRESETS.map((preset) => {
+            const isSelected = twin.location.name.toLowerCase().includes(preset.locationName.toLowerCase());
+            return (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => selectPreset(preset)}
+                disabled={loadingBackend}
+                className={`flex items-center gap-2 rounded-xl border px-4 py-2.5 text-xs font-bold transition-all ${
+                  isSelected
+                    ? "border-[#39d4b4] bg-[#39d4b4]/20 text-[#69e8d1] shadow-lg shadow-[#39d4b4]/20"
+                    : "border-[#39506e] bg-[#07111f] text-[#9aabc1] hover:border-[#39d4b4]/60 hover:text-white"
+                }`}
+              >
+                <span className="text-sm">📍</span>
+                <span>{preset.label}</span>
+                {isSelected && <span className="text-[10px] text-[#39d4b4] font-mono">ACTIVE</span>}
+              </button>
+            );
+          })}
+          {loadingBackend && <span className="text-xs text-[#39d4b4] animate-pulse">Syncing real GIS & weather…</span>}
         </div>
       </div>
 
-      {/* Preset Scenarios */}
-      <div className="mt-4 flex flex-wrap items-center gap-2">
-        <span className="text-xs font-medium text-[#9aabc1]">Scenario Presets:</span>
-        {PRESETS.map((p) => (
-          <button
-            key={p.label}
-            type="button"
-            onClick={() => {
-              loadScenarioFromBackend(p.place, p.pop, p.buses, p.boats, p.ambulances);
-            }}
-            disabled={loadingBackend}
-            className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-all ${
-              twin.location.name.toLowerCase().includes(p.place.toLowerCase())
-                ? "border-[#39d4b4] bg-[#39d4b4]/20 text-[#69e8d1]"
-                : "border-[#39506e] bg-[#07111f] text-[#9aabc1] hover:border-[#39d4b4]/50"
-            }`}
-          >
-            {p.label}
-          </button>
-        ))}
-        {loadingBackend && <span className="text-xs text-[#39d4b4] animate-pulse">Syncing GIS & routes…</span>}
+      {/* 2. AUTOMATIC BEST-ROUTE SUMMARY CARD */}
+      <div className="mt-5 rounded-xl border border-[#39d4b4]/30 bg-[#0a232b] p-4 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#39d4b4]/20 text-base">
+              🛣️
+            </span>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-bold tracking-wide text-[#69e8d1]">AUTOMATIC BEST CORRIDOR:</span>
+                <span className="rounded bg-[#39d4b4]/20 px-2 py-0.5 font-mono text-[11px] font-bold text-white">
+                  {bestRoute?.name || "Route 1"}
+                </span>
+                <span className="text-[11px] text-[#39d4b4]">★ Dynamic Best Fit</span>
+              </div>
+              <p className="mt-0.5 text-[#b6c4d5]">
+                {bestRoute?.tradeoffRationale}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="text-right">
+              <span className="text-[#9aabc1] block text-[10px]">One-Way Transit</span>
+              <span className="font-mono text-sm font-bold text-white">{bestRoute?.travelMinutes} min</span>
+            </div>
+            <div className="text-right">
+              <span className="text-[#9aabc1] block text-[10px]">Corridor Distance</span>
+              <span className="font-mono text-sm font-bold text-white">{bestRoute?.distanceKm} km</span>
+            </div>
+            <div className="text-right">
+              <span className="text-[#9aabc1] block text-[10px]">Risk Index</span>
+              <span className="font-mono text-sm font-bold text-amber-300">{bestRoute?.riskScore}/100</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Destination & Transparency metadata */}
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#1a3c42] pt-2.5 text-[11px]">
+          <div className="flex items-center gap-2">
+            <span className="text-[#9aabc1]">Evacuation Destination:</span>
+            <span className="font-semibold text-emerald-300">
+              {bestDestinationInfo.destination ? bestDestinationInfo.destination.name : "No verified destination available."}
+            </span>
+            <span className="text-[#9aabc1]">({bestDestinationInfo.rationale})</span>
+          </div>
+
+          {/* Quick Dynamic Re-evaluation Toggles */}
+          <div className="flex items-center gap-2">
+            <span className="text-[#9aabc1]">Dynamic Route Stress:</span>
+            <button
+              type="button"
+              onClick={toggleRainfallSurge}
+              className={`rounded border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+                isSurgeRainfall
+                  ? "border-blue-400 bg-blue-500/20 text-blue-200"
+                  : "border-[#39506e] bg-[#07111f] text-[#9aabc1] hover:border-blue-400"
+              }`}
+            >
+              🌧️ Rainfall +30% {isSurgeRainfall ? "(ON)" : ""}
+            </button>
+            <button
+              type="button"
+              onClick={toggleRouteClosure}
+              className={`rounded border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+                isRoute1Closed
+                  ? "border-red-400 bg-red-500/20 text-red-200"
+                  : "border-[#39506e] bg-[#07111f] text-[#9aabc1] hover:border-red-400"
+              }`}
+            >
+              🚧 Close Route 1 {isRoute1Closed ? "(BLOCKED)" : ""}
+            </button>
+          </div>
+        </div>
       </div>
 
-      {/* Navigation Tabs */}
+      {/* NAVIGATION TABS */}
       <div className="mt-5 flex border-b border-[#23354d]">
         {[
-          { id: "simulation", label: "⚡ Simulation & What-If" },
-          { id: "decision-twin", label: "🧬 Decision Twin Spec" },
+          { id: "probabilistic", label: "🎲 Phase 9: Monte Carlo Probabilistic" },
+          { id: "deterministic", label: "⚡ Deterministic & What-If" },
           { id: "routes", label: `🛣️ Route Candidates (${result.selectedRoutes.length})` },
-          { id: "transparency", label: "🔍 Data Transparency & Status" }
+          { id: "twin-spec", label: "🧬 Decision Twin Specification" },
+          { id: "transparency", label: "🔍 Provenance & Transparency" }
         ].map((tab) => (
           <button
             key={tab.id}
@@ -238,10 +393,268 @@ export function DecisionTwinSimulationPanel({
         ))}
       </div>
 
-      {/* TAB 1: SIMULATION & WHAT-IF ENGINE */}
-      {activeTab === "simulation" && (
+      {/* ==================================================== */}
+      {/* TAB 1: PHASE 9 MONTE CARLO PROBABILISTIC SIMULATION  */}
+      {/* ==================================================== */}
+      {activeTab === "probabilistic" && (
         <div className="mt-6 space-y-6">
-          {/* Top Row: Core Metrics Grid */}
+          {/* Controls Bar: Iterations & PRNG Seed */}
+          <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-[#23354d] bg-[#10233a] p-4">
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-bold text-[#e6edf7]">Monte Carlo Iterations:</span>
+              <div className="flex items-center gap-1.5">
+                {([100, 500, 1000, 5000] as const).map((count) => (
+                  <button
+                    key={count}
+                    type="button"
+                    onClick={() => {
+                      setMcIterations(count);
+                      executeMonteCarlo(twin, count, mcSeed);
+                    }}
+                    className={`rounded-lg border px-3 py-1 font-mono text-xs font-bold transition-all ${
+                      mcIterations === count
+                        ? "border-[#39d4b4] bg-[#39d4b4]/20 text-[#69e8d1]"
+                        : "border-[#39506e] bg-[#07111f] text-[#9aabc1] hover:border-[#39d4b4]/50"
+                    }`}
+                  >
+                    {count.toLocaleString()}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <span className="font-mono text-xs text-[#9aabc1]">
+                PRNG Seed: <b className="text-white">{mcSeed}</b>
+              </span>
+              <button
+                type="button"
+                onClick={handleRerollSeed}
+                className="rounded-lg border border-[#39506e] bg-[#07111f] px-3 py-1 text-xs font-semibold text-[#69e8d1] transition-colors hover:border-[#39d4b4]"
+              >
+                🎲 Re-roll Seed
+              </button>
+              <button
+                type="button"
+                onClick={() => executeMonteCarlo(twin, mcIterations, mcSeed)}
+                className="rounded-lg bg-[#39d4b4] px-4 py-1.5 text-xs font-bold text-[#062019] shadow-md shadow-[#39d4b4]/20 hover:opacity-90"
+              >
+                Run Monte Carlo ({mcIterations})
+              </button>
+            </div>
+          </div>
+
+          {/* Key Probabilistic Gauges Grid */}
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            <ProbMetricCard
+              label="Success Probability"
+              value={`${probResult.successProbability}%`}
+              subtext={`${probResult.successCount} of ${probResult.totalIterations} passed`}
+              badge={probResult.successProbability >= 70 ? "HIGH CONFIDENCE" : "RISK BREACH"}
+              color={probResult.successProbability >= 70 ? "emerald" : "red"}
+            />
+            <ProbMetricCard
+              label="Failure Probability"
+              value={`${probResult.failureProbability}%`}
+              subtext="Over budget or window"
+              color={probResult.failureProbability > 30 ? "red" : "blue"}
+            />
+            <ProbMetricCard
+              label="Median Time (P50)"
+              value={`${probResult.timeStats.median} min`}
+              subtext={`Mean: ${probResult.timeStats.mean} min`}
+              color="teal"
+            />
+            <ProbMetricCard
+              label="P90 Conservative Time"
+              value={`${probResult.timeStats.p90} min`}
+              subtext="90% of scenarios finish within"
+              color="amber"
+            />
+            <ProbMetricCard
+              label="P10 Optimistic Time"
+              value={`${probResult.timeStats.p10} min`}
+              subtext="Best 10% conditions"
+              color="teal"
+            />
+            <ProbMetricCard
+              label="Time Std Deviation"
+              value={`±${probResult.timeStats.stdDev} min`}
+              subtext={`Min ${probResult.timeStats.min} · Max ${probResult.timeStats.max}`}
+              color="blue"
+            />
+          </div>
+
+          {/* Statistical Percentiles Breakdown Table */}
+          <div className="rounded-xl border border-[#23354d] bg-[#10233a] p-5">
+            <div className="flex items-center justify-between border-b border-[#23354d] pb-3">
+              <div>
+                <h3 className="text-sm font-bold text-[#e6edf7]">
+                  Monte Carlo Percentile Statistics ({probResult.totalIterations.toLocaleString()} Iterations)
+                </h3>
+                <p className="text-xs text-[#9aabc1]">
+                  Calculated from stochastic variation of population, cloudburst rainfall, urban traffic, and turnaround delays.
+                </p>
+              </div>
+              <span className="font-mono text-xs text-[#69e8d1]">
+                Seed: {probResult.seed} (Deterministic)
+              </span>
+            </div>
+
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-[#23354d] text-[#9aabc1]">
+                    <th className="pb-2 font-medium">Metric Dimension</th>
+                    <th className="pb-2 font-medium">Mean (μ)</th>
+                    <th className="pb-2 font-medium">Median (P50)</th>
+                    <th className="pb-2 font-medium">P10 (Optimistic)</th>
+                    <th className="pb-2 font-medium">P25</th>
+                    <th className="pb-2 font-medium">P75</th>
+                    <th className="pb-2 font-medium">P90 (Conservative)</th>
+                    <th className="pb-2 font-medium">Std Dev (σ)</th>
+                    <th className="pb-2 font-medium">Observed Range</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#1b2b3f] text-[#e6edf7]">
+                  <tr>
+                    <td className="py-2.5 font-bold text-[#39d4b4]">Evacuation Time</td>
+                    <td className="py-2.5 font-mono">{probResult.timeStats.mean} min</td>
+                    <td className="py-2.5 font-mono font-bold text-white">{probResult.timeStats.median} min</td>
+                    <td className="py-2.5 font-mono text-emerald-300">{probResult.timeStats.p10} min</td>
+                    <td className="py-2.5 font-mono">{probResult.timeStats.p25} min</td>
+                    <td className="py-2.5 font-mono">{probResult.timeStats.p75} min</td>
+                    <td className="py-2.5 font-mono font-bold text-amber-300">{probResult.timeStats.p90} min</td>
+                    <td className="py-2.5 font-mono">±{probResult.timeStats.stdDev} min</td>
+                    <td className="py-2.5 font-mono text-[#9aabc1]">{probResult.timeStats.min} – {probResult.timeStats.max} min</td>
+                  </tr>
+                  <tr>
+                    <td className="py-2.5 font-bold text-blue-300">Estimated Cost</td>
+                    <td className="py-2.5 font-mono">₹{Math.round(probResult.costStats.mean).toLocaleString()}</td>
+                    <td className="py-2.5 font-mono font-bold text-white">₹{Math.round(probResult.costStats.median).toLocaleString()}</td>
+                    <td className="py-2.5 font-mono text-emerald-300">₹{Math.round(probResult.costStats.p10).toLocaleString()}</td>
+                    <td className="py-2.5 font-mono">₹{Math.round(probResult.costStats.p25).toLocaleString()}</td>
+                    <td className="py-2.5 font-mono">₹{Math.round(probResult.costStats.p75).toLocaleString()}</td>
+                    <td className="py-2.5 font-mono font-bold text-amber-300">₹{Math.round(probResult.costStats.p90).toLocaleString()}</td>
+                    <td className="py-2.5 font-mono">±₹{Math.round(probResult.costStats.stdDev).toLocaleString()}</td>
+                    <td className="py-2.5 font-mono text-[#9aabc1]">₹{Math.round(probResult.costStats.min).toLocaleString()} – ₹{Math.round(probResult.costStats.max).toLocaleString()}</td>
+                  </tr>
+                  <tr>
+                    <td className="py-2.5 font-bold text-amber-300">Flood Risk Index</td>
+                    <td className="py-2.5 font-mono">{probResult.riskStats.mean}/100</td>
+                    <td className="py-2.5 font-mono font-bold text-white">{probResult.riskStats.median}/100</td>
+                    <td className="py-2.5 font-mono text-emerald-300">{probResult.riskStats.p10}/100</td>
+                    <td className="py-2.5 font-mono">{probResult.riskStats.p25}/100</td>
+                    <td className="py-2.5 font-mono">{probResult.riskStats.p75}/100</td>
+                    <td className="py-2.5 font-mono font-bold text-amber-300">{probResult.riskStats.p90}/100</td>
+                    <td className="py-2.5 font-mono">±{probResult.riskStats.stdDev}</td>
+                    <td className="py-2.5 font-mono text-[#9aabc1]">{probResult.riskStats.min} – {probResult.riskStats.max}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            {/* Risk Distribution Bar */}
+            <div className="mt-5 border-t border-[#23354d] pt-4">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-[#e6edf7]">Simulated Risk Level Distribution Across Iterations</span>
+                <span className="text-[#9aabc1]">Target Threshold: &lt; 60 Moderate</span>
+              </div>
+
+              <div className="mt-2 flex h-5 w-full overflow-hidden rounded-lg bg-[#07111f]">
+                <div
+                  style={{ width: `${probResult.riskDistribution.low.percentage}%` }}
+                  className="bg-emerald-500 transition-all"
+                  title={`Low (<35): ${probResult.riskDistribution.low.percentage}%`}
+                />
+                <div
+                  style={{ width: `${probResult.riskDistribution.moderate.percentage}%` }}
+                  className="bg-teal-500 transition-all"
+                  title={`Moderate (35-59): ${probResult.riskDistribution.moderate.percentage}%`}
+                />
+                <div
+                  style={{ width: `${probResult.riskDistribution.high.percentage}%` }}
+                  className="bg-amber-500 transition-all"
+                  title={`High (60-79): ${probResult.riskDistribution.high.percentage}%`}
+                />
+                <div
+                  style={{ width: `${probResult.riskDistribution.critical.percentage}%` }}
+                  className="bg-red-500 transition-all"
+                  title={`Critical (≥80): ${probResult.riskDistribution.critical.percentage}%`}
+                />
+              </div>
+
+              <div className="mt-2 flex flex-wrap gap-4 text-[11px]">
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-sm bg-emerald-500" />
+                  <span className="text-[#b6c4d5]">Low (&lt;35): <b>{probResult.riskDistribution.low.percentage}%</b></span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-sm bg-teal-500" />
+                  <span className="text-[#b6c4d5]">Moderate (35–59): <b>{probResult.riskDistribution.moderate.percentage}%</b></span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-sm bg-amber-500" />
+                  <span className="text-[#b6c4d5]">High (60–79): <b>{probResult.riskDistribution.high.percentage}%</b></span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-sm bg-red-500" />
+                  <span className="text-[#b6c4d5]">Critical (≥80): <b>{probResult.riskDistribution.critical.percentage}%</b></span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 3. EXPANDABLE SIMULATION ASSUMPTIONS DRAWER */}
+          <div className="rounded-xl border border-[#23354d] bg-[#10233a] p-4 text-xs">
+            <button
+              type="button"
+              onClick={() => setIsAssumptionsExpanded(!isAssumptionsExpanded)}
+              className="flex w-full items-center justify-between font-bold text-[#e6edf7] transition-colors hover:text-[#39d4b4]"
+            >
+              <span className="flex items-center gap-2">
+                <span>📋</span>
+                <span>SIMULATION ASSUMPTIONS & STOCHASTIC DISTRIBUTIONS ({probResult.assumptions.length} Variables)</span>
+              </span>
+              <span>{isAssumptionsExpanded ? "▲ Collapse Assumptions" : "▼ Expand Assumptions"}</span>
+            </button>
+
+            {isAssumptionsExpanded && (
+              <div className="mt-4 space-y-3 border-t border-[#23354d] pt-3">
+                <p className="text-[11px] text-[#9aabc1]">
+                  All variables below are sampled per iteration using the seeded Mulberry32 pseudo-random generator. Labels marked <span className="text-[#69e8d1]">SIMULATED</span> reflect mathematical stochastic modeling.
+                </p>
+
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  {probResult.assumptions.map((u) => (
+                    <div key={u.id} className="rounded-lg border border-[#23354d] bg-[#07111f] p-3">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-white truncate">{u.name}</span>
+                        <span className="rounded bg-[#113c3d] px-1.5 py-0.5 font-mono text-[9px] text-[#69e8d1] font-bold">
+                          {u.distribution}
+                        </span>
+                      </div>
+                      <p className="mt-1 font-mono text-xs text-[#39d4b4]">
+                        Range: {u.min} – {u.max} {u.unit}
+                      </p>
+                      <p className="mt-1 text-[10px] leading-relaxed text-[#9aabc1]">
+                        {u.explanation}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================== */}
+      {/* TAB 2: DETERMINISTIC WHAT-IF ENGINE                   */}
+      {/* ==================================================== */}
+      {activeTab === "deterministic" && (
+        <div className="mt-6 space-y-6">
+          {/* Core Metrics */}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
             <MetricCard
               label="Evacuation Time"
@@ -281,77 +694,14 @@ export function DecisionTwinSimulationPanel({
             />
           </div>
 
-          {/* Critical Constraint Violations Alert */}
-          {result.constraintViolations.length > 0 && (
-            <div className="rounded-xl border border-red-500/50 bg-red-500/10 p-4">
-              <div className="flex items-center gap-2 text-red-400">
-                <span className="text-lg">⚠️</span>
-                <h4 className="text-sm font-bold tracking-wide">
-                  {result.constraintViolations.length} Constraint Violation(s) Detected
-                </h4>
-              </div>
-              <div className="mt-2.5 space-y-2">
-                {result.constraintViolations.map((v, idx) => (
-                  <div
-                    key={idx}
-                    className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-500/30 bg-[#07111f]/60 px-3 py-2 text-xs"
-                  >
-                    <div>
-                      <span className="font-semibold text-red-200">{v.constraint}:</span>{" "}
-                      <span className="text-[#9aabc1]">{v.message}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="rounded bg-red-500/20 px-2 py-0.5 font-mono text-[11px] font-bold text-red-300">
-                        {v.severity}
-                      </span>
-                      <span className="font-mono text-[11px] text-[#9aabc1]">
-                        Actual: <b className="text-white">{v.actualValue}</b> / Allowed:{" "}
-                        <b className="text-white">{v.allowedValue}</b>
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Bottlenecks Callout */}
-          {result.bottlenecks.length > 0 && (
-            <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4">
-              <div className="flex items-center gap-2 text-amber-400">
-                <span className="text-base">🚨</span>
-                <h4 className="text-sm font-bold tracking-wide">Primary Operational Bottlenecks</h4>
-              </div>
-              <div className="mt-2.5 space-y-2">
-                {result.bottlenecks.map((b, idx) => (
-                  <div
-                    key={idx}
-                    className="rounded-lg border border-amber-500/20 bg-[#07111f]/70 p-3 text-xs"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-amber-300">{b.resourceOrFactor}</span>
-                      <span className="rounded bg-amber-500/20 px-2 py-0.5 font-mono text-[10px] text-amber-300 font-semibold">
-                        {b.severity}
-                      </span>
-                    </div>
-                    <p className="mt-1 text-[#e6edf7]">{b.message}</p>
-                    <p className="mt-1 text-[11px] text-[#9aabc1]">
-                      <b>Impact:</b> {b.impact}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* DYNAMIC WHAT-IF CONTROLS: RESOURCES & PRIORITIES */}
+          {/* DYNAMIC WHAT-IF CONTROLS */}
           <div className="grid gap-6 lg:grid-cols-2">
-            {/* Left Box: Dynamic Resources */}
+            {/* Left Box: Resources */}
             <div className="rounded-xl border border-[#39506e] bg-[#10233a] p-5">
               <div className="flex items-center justify-between border-b border-[#23354d] pb-3">
                 <div>
-                  <h3 className="text-sm font-bold text-[#e6edf7]">Dynamic Resources Allocation</h3>
-                  <p className="text-xs text-[#9aabc1]">Instant what-if: tweak numbers to rerun the simulation in 0ms.</p>
+                  <h3 className="text-sm font-bold text-[#e6edf7]">Dynamic Resources (What-If)</h3>
+                  <p className="text-xs text-[#9aabc1]">Tweak fleet sizes to test instant recalculation in 0ms.</p>
                 </div>
                 <span className="rounded-full bg-[#39d4b4]/10 px-2.5 py-0.5 text-[11px] font-bold text-[#39d4b4]">
                   LIVE WHAT-IF
@@ -399,7 +749,7 @@ export function DecisionTwinSimulationPanel({
                     className="mt-2 w-full accent-[#39d4b4]"
                   />
                   <div className="mt-1 flex justify-between text-[10px] text-[#9aabc1]">
-                    <span>Single-wave bus throughput: {twin.resources.buses.value * 50} persons</span>
+                    <span>Capacity: {twin.resources.buses.value * 50} persons</span>
                     <span>Utilization: {result.resourceUtilization.buses.utilizationPercent}%</span>
                   </div>
                 </div>
@@ -444,54 +794,24 @@ export function DecisionTwinSimulationPanel({
                     className="mt-2 w-full accent-[#39d4b4]"
                   />
                   <div className="mt-1 flex justify-between text-[10px] text-[#9aabc1]">
-                    <span>Single-wave boat capacity: {twin.resources.boats.value * 20} persons</span>
+                    <span>Capacity: {twin.resources.boats.value * 20} persons</span>
                     <span>Utilization: {result.resourceUtilization.boats.utilizationPercent}%</span>
                   </div>
                 </div>
 
-                {/* Ambulances */}
-                <div>
-                  <div className="flex items-center justify-between text-xs">
-                    <label className="font-semibold text-[#e6edf7]">
-                      🚑 Ambulances (2 cap / ₹2,500/hr)
-                    </label>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleResourceChange("ambulances", Math.max(0, twin.resources.ambulances.value - 1))}
-                        className="h-6 w-6 rounded bg-[#07111f] text-sm hover:bg-[#23354d]"
-                      >
-                        -
-                      </button>
-                      <input
-                        type="number"
-                        min="0"
-                        max="30"
-                        value={twin.resources.ambulances.value}
-                        onChange={(e) => handleResourceChange("ambulances", Number(e.target.value))}
-                        className="w-16 rounded border border-[#39506e] bg-[#07111f] px-2 py-0.5 text-center font-mono text-sm font-bold text-[#39d4b4]"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => handleResourceChange("ambulances", twin.resources.ambulances.value + 1)}
-                        className="h-6 w-6 rounded bg-[#07111f] text-sm hover:bg-[#23354d]"
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="20"
-                    value={twin.resources.ambulances.value}
-                    onChange={(e) => handleResourceChange("ambulances", Number(e.target.value))}
-                    className="mt-2 w-full accent-[#39d4b4]"
-                  />
-                </div>
-
-                {/* Rescue Teams & Budget */}
+                {/* Ambulances & Teams */}
                 <div className="grid grid-cols-2 gap-3 pt-2">
+                  <div>
+                    <label className="text-xs font-semibold text-[#e6edf7]">Ambulances</label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="30"
+                      value={twin.resources.ambulances.value}
+                      onChange={(e) => handleResourceChange("ambulances", Number(e.target.value))}
+                      className="mt-1 w-full rounded-lg border border-[#39506e] bg-[#07111f] p-2 font-mono text-xs text-white"
+                    />
+                  </div>
                   <div>
                     <label className="text-xs font-semibold text-[#e6edf7]">Rescue Teams</label>
                     <input
@@ -503,33 +823,23 @@ export function DecisionTwinSimulationPanel({
                       className="mt-1 w-full rounded-lg border border-[#39506e] bg-[#07111f] p-2 font-mono text-xs text-white"
                     />
                   </div>
-                  <div>
-                    <label className="text-xs font-semibold text-[#e6edf7]">Max Budget (₹)</label>
-                    <input
-                      type="number"
-                      step="10000"
-                      value={twin.resources.budget.value}
-                      onChange={(e) => handleResourceChange("budget", Number(e.target.value))}
-                      className="mt-1 w-full rounded-lg border border-[#39506e] bg-[#07111f] p-2 font-mono text-xs text-white"
-                    />
-                  </div>
                 </div>
               </div>
             </div>
 
-            {/* Right Box: Priority Weights (Strict 100% sum) */}
+            {/* Right Box: Priority Weights */}
             <div className="rounded-xl border border-[#39506e] bg-[#10233a] p-5">
               <div className="flex items-center justify-between border-b border-[#23354d] pb-3">
                 <div>
                   <h3 className="text-sm font-bold text-[#e6edf7]">Priorities Weights (Sum = 100%)</h3>
-                  <p className="text-xs text-[#9aabc1]">Adjust weightings to alter the simulation ranking criteria.</p>
+                  <p className="text-xs text-[#9aabc1]">Alter weights to re-rank candidate routes dynamically.</p>
                 </div>
                 <span className="rounded-full bg-[#39d4b4]/10 px-2.5 py-0.5 font-mono text-[11px] font-bold text-[#39d4b4]">
                   Total: {twin.priorities.safety + twin.priorities.speed + twin.priorities.cost + twin.priorities.coverage + twin.priorities.reliability}%
                 </span>
               </div>
 
-              {/* Priority Profiles */}
+              {/* Profiles */}
               <div className="mt-3 flex flex-wrap gap-1.5">
                 <button
                   type="button"
@@ -565,104 +875,61 @@ export function DecisionTwinSimulationPanel({
                 <PrioritySlider
                   label="Safety Priority"
                   weight={twin.priorities.safety}
-                  subtext="Avoids inundated canals & high-risk corridors"
+                  subtext="Penalizes flood-prone bridges and waterlogged underpasses"
                   onChange={(v) => handlePriorityChange("safety", v)}
                 />
                 <PrioritySlider
                   label="Speed Priority"
                   weight={twin.priorities.speed}
-                  subtext="Prioritizes shortest turnaround & fastest evacuation waves"
+                  subtext="Prioritizes shortest driving minutes and rapid transit waves"
                   onChange={(v) => handlePriorityChange("speed", v)}
                 />
                 <PrioritySlider
                   label="Cost Priority"
                   weight={twin.priorities.cost}
-                  subtext="Conserves vehicle fleet operational hours & fuel expenditure"
+                  subtext="Conserves vehicle operational hours and fuel surcharge"
                   onChange={(v) => handlePriorityChange("cost", v)}
                 />
-                <PrioritySlider
-                  label="Coverage Priority"
-                  weight={twin.priorities.coverage}
-                  subtext="Ensures total affected population coverage in minimal waves"
-                  onChange={(v) => handlePriorityChange("coverage", v)}
-                />
-                <PrioritySlider
-                  label="Reliability Priority"
-                  weight={twin.priorities.reliability}
-                  subtext="Penalizes routes near known stormwater drains"
-                  onChange={(v) => handlePriorityChange("reliability", v)}
-                />
               </div>
             </div>
           </div>
 
-          {/* Operational Briefing / Explanation */}
-          <div className="rounded-xl border border-[#39d4b4]/40 bg-[#0b292d] p-4 text-xs leading-relaxed text-[#c5d7e9]">
-            <p className="font-bold text-[#69e8d1] tracking-wide">DECISION TWIN OPERATIONAL BRIEFING</p>
-            <p className="mt-1.5">{result.explanation}</p>
-          </div>
-        </div>
-      )}
-
-      {/* TAB 2: DECISION TWIN SPECIFICATION */}
-      {activeTab === "decision-twin" && (
-        <div className="mt-6 space-y-4">
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            <SpecCard title="Scenario Identification">
-              <p><b>ID:</b> <span className="font-mono text-[#39d4b4]">{twin.scenarioId}</span></p>
-              <p><b>Name:</b> {twin.scenarioName}</p>
-              <p><b>Type:</b> {twin.scenarioType}</p>
-              <p><b>Hazard:</b> {twin.hazard.description}</p>
-              <p><b>Water Depth:</b> {twin.hazard.waterLevel.value} ({twin.hazard.waterLevel.status})</p>
-            </SpecCard>
-
-            <SpecCard title="Geographic & Environmental Context">
-              <p><b>Location:</b> {twin.location.name}</p>
-              <p><b>Coordinates:</b> {twin.location.lat.toFixed(4)}, {twin.location.lng.toFixed(4)}</p>
-              <p><b>Storm Drains in Area:</b> {twin.geographicContext?.drains ?? "0"} (GCC GIS)</p>
-              <p><b>Rivers in Area:</b> {twin.geographicContext?.rivers ?? "0"} (GCC GIS)</p>
-              <p><b>Recorded Rainfall:</b> {twin.weatherContext?.rainfallMm ?? 0} mm (Open-Meteo)</p>
-            </SpecCard>
-
-            <SpecCard title="Historical Disaster Record">
-              <p><b>Locality Risk:</b> <span className="font-bold text-amber-400">{twin.historicalContext.localityRiskLevel}</span></p>
-              <p><b>Historical Match:</b> {twin.historicalContext.matchedEvent ? twin.historicalContext.matchedEvent.name : "None specific"}</p>
-              <p className="text-[11px] leading-relaxed text-[#9aabc1]">{twin.historicalContext.historicalInundationNotes}</p>
-            </SpecCard>
-          </div>
-
-          <div className="rounded-xl border border-[#23354d] bg-[#10233a] p-4 text-xs">
-            <h4 className="font-bold text-[#e6edf7]">Active Constraints Enforced</h4>
-            <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-              <div className="rounded bg-[#07111f] p-2.5">
-                <p className="text-[#9aabc1]">Max Response Window</p>
-                <p className="font-mono font-bold text-white">{twin.constraints.maxResponseTimeMinutes.allowedValue} min</p>
+          {/* Bottlenecks Callout */}
+          {result.bottlenecks.length > 0 && (
+            <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4">
+              <div className="flex items-center gap-2 text-amber-400">
+                <span className="text-base">🚨</span>
+                <h4 className="text-sm font-bold tracking-wide">Primary Operational Bottlenecks</h4>
               </div>
-              <div className="rounded bg-[#07111f] p-2.5">
-                <p className="text-[#9aabc1]">Max Operating Budget</p>
-                <p className="font-mono font-bold text-white">₹{twin.constraints.maxBudget.allowedValue.toLocaleString()}</p>
-              </div>
-              <div className="rounded bg-[#07111f] p-2.5">
-                <p className="text-[#9aabc1]">Min Boat Requirement</p>
-                <p className="font-mono font-bold text-white">≥ {twin.constraints.minBoatsRequired.allowedValue} boats</p>
-              </div>
-              <div className="rounded bg-[#07111f] p-2.5">
-                <p className="text-[#9aabc1]">Min Bus Requirement</p>
-                <p className="font-mono font-bold text-white">≥ {twin.constraints.minBusesRequired.allowedValue} buses</p>
+              <div className="mt-2.5 space-y-2">
+                {result.bottlenecks.map((b, idx) => (
+                  <div key={idx} className="rounded-lg border border-amber-500/20 bg-[#07111f]/70 p-3 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-amber-300">{b.resourceOrFactor}</span>
+                      <span className="rounded bg-amber-500/20 px-2 py-0.5 font-mono text-[10px] text-amber-300 font-semibold">
+                        {b.severity}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-[#e6edf7]">{b.message}</p>
+                    <p className="mt-1 text-[11px] text-[#9aabc1]"><b>Impact:</b> {b.impact}</p>
+                  </div>
+                ))}
               </div>
             </div>
-          </div>
+          )}
         </div>
       )}
 
-      {/* TAB 3: CANDIDATE ROUTES */}
+      {/* ==================================================== */}
+      {/* TAB 3: CANDIDATE ROUTES (DYNAMIC SCORING)            */}
+      {/* ==================================================== */}
       {activeTab === "routes" && (
         <div className="mt-6 space-y-4">
-          <div className="flex items-center justify-between">
-            <p className="text-xs text-[#9aabc1]">
-              Routes calculated from <b>VIT Chennai Base</b> to <b>{twin.location.name}</b> and scored deterministically.
+          <div className="flex items-center justify-between text-xs">
+            <p className="text-[#9aabc1]">
+              Corridors from <b>VIT Chennai Base</b> to <b>{twin.location.name}</b> evaluated dynamically against Safety ({twin.priorities.safety}%), Speed ({twin.priorities.speed}%), and Cost ({twin.priorities.cost}%).
             </p>
-            <span className="text-xs text-[#39d4b4]">Click route to highlight on map</span>
+            <span className="text-[#39d4b4]">Click route to view on map</span>
           </div>
 
           <div className="space-y-3">
@@ -689,18 +956,16 @@ export function DecisionTwinSimulationPanel({
                   <div className="flex items-center gap-2">
                     {r.isRecommended && (
                       <span className="rounded bg-[#39d4b4]/20 px-2 py-0.5 text-[11px] font-bold text-[#69e8d1]">
-                        ★ RECOMMENDED (HIGHEST SCORE)
+                        ★ DYNAMIC BEST ROUTE
                       </span>
                     )}
-                    <span className="font-mono text-xs font-bold text-white">
-                      Score: {r.score}/100
-                    </span>
+                    <span className="font-mono text-xs font-bold text-white">Score: {r.score}/100</span>
                   </div>
                 </div>
 
                 <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
                   <div className="rounded bg-[#07111f]/60 p-2">
-                    <p className="text-[#9aabc1]">One-Way Time</p>
+                    <p className="text-[#9aabc1]">One-Way Transit</p>
                     <p className="font-semibold text-white">{r.travelMinutes} min</p>
                   </div>
                   <div className="rounded bg-[#07111f]/60 p-2">
@@ -719,9 +984,9 @@ export function DecisionTwinSimulationPanel({
 
                 <p className="mt-2 text-xs text-[#b6c4d5]">{r.tradeoffRationale}</p>
 
-                {/* Available vs Unavailable Factors */}
+                {/* Provenance factors */}
                 <div className="mt-2.5 flex flex-wrap gap-1.5 text-[10px]">
-                  <span className="text-[#9aabc1]">Available:</span>
+                  <span className="text-[#9aabc1]">Available factors:</span>
                   {r.availableFactors.map((f, i) => (
                     <span key={i} className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-emerald-300">
                       ✓ {f}
@@ -740,44 +1005,56 @@ export function DecisionTwinSimulationPanel({
         </div>
       )}
 
-      {/* TAB 4: DATA TRANSPARENCY */}
+      {/* ==================================================== */}
+      {/* TAB 4: DECISION TWIN SPECIFICATION                   */}
+      {/* ==================================================== */}
+      {activeTab === "twin-spec" && (
+        <div className="mt-6 space-y-4 text-xs">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="rounded-xl border border-[#23354d] bg-[#10233a] p-4 space-y-1.5">
+              <h4 className="font-bold text-[#e6edf7] border-b border-[#23354d] pb-2">Scenario Identification</h4>
+              <p><b>ID:</b> <span className="font-mono text-[#39d4b4]">{twin.scenarioId}</span></p>
+              <p><b>Name:</b> {twin.scenarioName}</p>
+              <p><b>Hazard:</b> {twin.hazard.description}</p>
+              <p><b>Water Depth:</b> {twin.hazard.waterLevel.value}</p>
+            </div>
+
+            <div className="rounded-xl border border-[#23354d] bg-[#10233a] p-4 space-y-1.5">
+              <h4 className="font-bold text-[#e6edf7] border-b border-[#23354d] pb-2">Environmental Context</h4>
+              <p><b>Location:</b> {twin.location.name}</p>
+              <p><b>Storm Drains:</b> {twin.geographicContext?.drains ?? 0} (GCC GIS)</p>
+              <p><b>Rivers:</b> {twin.geographicContext?.rivers ?? 0} (GCC GIS)</p>
+              <p><b>Rainfall:</b> {twin.weatherContext?.rainfallMm ?? 0} mm (Open-Meteo)</p>
+            </div>
+
+            <div className="rounded-xl border border-[#23354d] bg-[#10233a] p-4 space-y-1.5">
+              <h4 className="font-bold text-[#e6edf7] border-b border-[#23354d] pb-2">Disaster Profile Match</h4>
+              <p><b>Locality Risk:</b> <span className="font-bold text-amber-300">{twin.historicalContext.localityRiskLevel}</span></p>
+              <p><b>Matched Event:</b> {twin.historicalContext.matchedEvent ? twin.historicalContext.matchedEvent.name : "South India Monsoon Base"}</p>
+              <p className="text-[11px] text-[#9aabc1]">{twin.historicalContext.historicalInundationNotes}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================== */}
+      {/* TAB 5: DATA TRANSPARENCY                             */}
+      {/* ==================================================== */}
       {activeTab === "transparency" && (
         <div className="mt-6 space-y-3">
           <p className="text-xs text-[#9aabc1]">
-            Every input and metric retains provenance metadata. No fictitious geographic or hospital numbers are fabricated.
+            Every input retains metadata provenance. Simulated parameters are explicitly distinguished from real-world telemetry.
           </p>
           <div className="space-y-2">
             {twin.dataSources.map((ds, idx) => (
-              <div
-                key={idx}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#23354d] bg-[#10233a] p-3 text-xs"
-              >
+              <div key={idx} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#23354d] bg-[#10233a] p-3 text-xs">
                 <div>
                   <p className="font-semibold text-[#e6edf7]">{ds.label}</p>
-                  <p className="text-[11px] text-[#9aabc1]">
-                    Source: <span className="text-[#69e8d1]">{ds.source}</span> ({ds.sourceType})
-                  </p>
+                  <p className="text-[11px] text-[#9aabc1]">Source: <span className="text-[#69e8d1]">{ds.source}</span> ({ds.sourceType})</p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`rounded px-2 py-0.5 font-mono text-[10px] font-bold ${
-                      ds.status === "VERIFIED"
-                        ? "bg-emerald-500/20 text-emerald-300"
-                        : ds.status === "LIVE_OR_NEAR_LIVE"
-                        ? "bg-blue-500/20 text-blue-300"
-                        : ds.status === "HISTORICAL"
-                        ? "bg-purple-500/20 text-purple-300"
-                        : ds.status === "UNAVAILABLE"
-                        ? "bg-zinc-800 text-zinc-400"
-                        : "bg-amber-500/20 text-amber-300"
-                    }`}
-                  >
-                    {ds.status}
-                  </span>
-                  <span className="font-mono text-[11px] text-[#9aabc1]">
-                    Confidence: {Math.round((ds.confidence ?? 0.8) * 100)}%
-                  </span>
-                </div>
+                <span className="rounded bg-emerald-500/20 px-2 py-0.5 font-mono text-[10px] font-bold text-emerald-300">
+                  {ds.status}
+                </span>
               </div>
             ))}
           </div>
@@ -816,6 +1093,57 @@ function MetricCard({
   );
 }
 
+function ProbMetricCard({
+  label,
+  value,
+  subtext,
+  badge,
+  color = "teal"
+}: {
+  label: string;
+  value: string;
+  subtext: string;
+  badge?: string;
+  color?: "teal" | "blue" | "red" | "emerald" | "amber";
+}) {
+  const bgClass =
+    color === "emerald"
+      ? "bg-emerald-500/10 border-emerald-500/30"
+      : color === "red"
+      ? "bg-red-500/10 border-red-500/30"
+      : color === "amber"
+      ? "bg-amber-500/10 border-amber-500/30"
+      : color === "blue"
+      ? "bg-blue-500/10 border-blue-500/30"
+      : "bg-[#113c3d] border-[#39d4b4]/30";
+
+  const valColor =
+    color === "emerald"
+      ? "text-emerald-300"
+      : color === "red"
+      ? "text-red-300"
+      : color === "amber"
+      ? "text-amber-300"
+      : color === "blue"
+      ? "text-blue-200"
+      : "text-[#69e8d1]";
+
+  return (
+    <div className={`rounded-xl border p-3.5 ${bgClass}`}>
+      <div className="flex items-center justify-between">
+        <p className="text-[11px] text-[#9aabc1]">{label}</p>
+        {badge && (
+          <span className="rounded bg-emerald-500/20 px-1.5 py-0.2 font-mono text-[9px] font-bold text-emerald-300">
+            {badge}
+          </span>
+        )}
+      </div>
+      <p className={`mt-1 font-mono text-xl font-bold ${valColor}`}>{value}</p>
+      <p className="mt-0.5 text-[10px] text-[#9aabc1] truncate">{subtext}</p>
+    </div>
+  );
+}
+
 function PrioritySlider({
   label,
   weight,
@@ -842,15 +1170,6 @@ function PrioritySlider({
         className="mt-1 w-full accent-[#39d4b4]"
       />
       <p className="text-[10px] text-[#9aabc1]">{subtext}</p>
-    </div>
-  );
-}
-
-function SpecCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="rounded-xl border border-[#23354d] bg-[#10233a] p-4 text-xs space-y-1.5">
-      <h4 className="font-bold text-[#e6edf7] border-b border-[#23354d] pb-2">{title}</h4>
-      <div className="space-y-1 text-[#b6c4d5]">{children}</div>
     </div>
   );
 }

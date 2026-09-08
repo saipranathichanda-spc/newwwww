@@ -22,6 +22,7 @@ const KNOWN_DESTINATIONS: Record<string, { name: string; lng: number; lat: numbe
   "chennai central": { name: "Chennai Central", lng: 80.2757, lat: 13.0827 },
   velachery: { name: "Velachery, Chennai", lng: 80.218, lat: 12.9815 },
   tambaram: { name: "Tambaram, Chennai", lng: 80.1000, lat: 12.9249 },
+  madipakkam: { name: "Madipakkam, Chennai", lng: 80.1983, lat: 12.9647 },
   guindy: { name: "Guindy, Chennai", lng: 80.2026, lat: 13.0067 },
   adyar: { name: "Adyar, Chennai", lng: 80.2565, lat: 13.0012 },
   kovalam: { name: "Kovalam, Chennai", lng: 80.251, lat: 12.787 },

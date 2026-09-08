@@ -12,7 +12,11 @@ export const metadata: Metadata = {
   description: "Decision intelligence for Chennai emergency response.",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
     <html
       lang="en"

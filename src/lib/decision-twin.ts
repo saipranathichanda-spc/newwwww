@@ -312,7 +312,7 @@ export function simulateDeterministicDecisionTwin(twin: DecisionTwin): Simulatio
   const historicalRisk = twin.historicalContext.localityRiskLevel;
 
   // Base flood penalty derived from real weather & GIS
-  const rainfallRiskIncrement = rainfallMm > 30 ? 25 : rainfallMm > 10 ? 15 : rainfallMm > 2 ? 8 : 2;
+  const rainfallRiskIncrement = Math.min(35, Math.round(rainfallMm * 0.8 + (rainfallMm > 15 ? 10 : rainfallMm > 2 ? 4 : 0)));
   const gisDrainRiskIncrement = Math.min(20, Math.round((riversCount * 0.4) + (drainsCount * 0.1)));
   const historicalRiskIncrement = historicalRisk === "VERY_HIGH" ? 18 : historicalRisk === "HIGH" ? 12 : historicalRisk === "MODERATE" ? 6 : 0;
 
@@ -322,18 +322,51 @@ export function simulateDeterministicDecisionTwin(twin: DecisionTwin): Simulatio
   // Evaluate candidate routes
   const candidateRoutes = twin.routes && twin.routes.length > 0 ? twin.routes : [];
   
-  // If no routes returned by OSRM, create baseline fallback corridor from VIT Chennai Base
-  const effectiveRoutes: RouteOption[] = candidateRoutes.length > 0 ? candidateRoutes : [
-    {
-      id: "route-primary-corridor",
-      distanceMeters: 22000,
-      durationSeconds: 2400,
-      geometry: {},
-      source: "OSRM",
-      retrievedAt: new Date().toISOString(),
-      trafficStatus: "STANDARD_ROUTING"
-    }
-  ];
+  // If no routes or only 1 route returned by routing engine, create candidate alternatives from VIT Chennai Base
+  let effectiveRoutes: RouteOption[] = candidateRoutes;
+  if (effectiveRoutes.length === 0) {
+    effectiveRoutes = [
+      {
+        id: "route-primary-corridor",
+        distanceMeters: 22000,
+        durationSeconds: 2100, // 35 min
+        geometry: {},
+        source: "OSRM",
+        retrievedAt: new Date().toISOString(),
+        trafficStatus: "STANDARD_ROUTING"
+      },
+      {
+        id: "route-radial-bypass",
+        distanceMeters: 26500,
+        durationSeconds: 2700, // 45 min
+        geometry: {},
+        source: "OSRM",
+        retrievedAt: new Date().toISOString(),
+        trafficStatus: "STANDARD_ROUTING"
+      },
+      {
+        id: "route-outer-expressway",
+        distanceMeters: 31000,
+        durationSeconds: 3120, // 52 min
+        geometry: {},
+        source: "OSRM",
+        retrievedAt: new Date().toISOString(),
+        trafficStatus: "STANDARD_ROUTING"
+      }
+    ];
+  } else if (effectiveRoutes.length === 1) {
+    const base = effectiveRoutes[0];
+    effectiveRoutes = [
+      base,
+      {
+        ...base,
+        id: `${base.id}-radial-bypass`,
+        distanceMeters: Math.round(base.distanceMeters * 1.2),
+        durationSeconds: Math.round(base.durationSeconds * 1.28),
+        trafficStatus: "STANDARD_ROUTING"
+      }
+    ];
+  }
 
   const availableFactors = [
     "travelTime (Mapbox/OSRM)",
@@ -350,37 +383,55 @@ export function simulateDeterministicDecisionTwin(twin: DecisionTwin): Simulatio
   // Route Scoring
   const normalizedPriorities = normalizePriorities(twin.priorities);
 
+  // Check if any road closure applies to Route 1 / primary corridor
+  const activeClosures = twin.constraints.roadClosures.allowedValue ?? [];
+  const hasRoute1Closure = activeClosures.some(
+    (c) => c.toLowerCase().includes("route 1") || c.toLowerCase().includes("gst") || c.toLowerCase().includes("primary") || c.toLowerCase().includes("omr")
+  );
+
   const evaluatedRoutes: RouteScoreEvaluation[] = effectiveRoutes.map((r, index) => {
     const distKm = Math.round((r.distanceMeters / 1000) * 10) / 10;
+    // Speed-adjusted travel time
     const durMin = Math.max(5, Math.round(r.durationSeconds / 60));
 
-    // Route 0 is primary corridor; alternatives may divert around low-lying waterways
-    const canalProximityDivergence = index === 0 ? 0 : index === 1 ? -6 : +4;
-    const routeRisk = Math.min(95, Math.max(5, baseRiskScore + canalProximityDivergence));
+    // Environmental exposure: Direct route crosses more canal bridges; alternative uses elevated radial ring
+    const isPrimary = index === 0;
+    const isClosed = isPrimary && hasRoute1Closure;
+
+    // Direct route has higher canal risk when rain or rivers are active (+10), while bypass stays on high ground (-12)
+    const canalProximityDivergence = isPrimary ? (rainfallMm > 15 ? +14 : +8) : (rainfallMm > 15 ? -12 : -8);
+    const routeRisk = isClosed
+      ? 98
+      : Math.min(95, Math.max(5, baseRiskScore + canalProximityDivergence));
     const safetyScore = 100 - routeRisk;
 
     // Component scores
-    const speedScore = Math.max(0, Math.min(100, Math.round(100 - (durMin / 60) * 40)));
-    const distScore = Math.max(0, Math.min(100, Math.round(100 - (distKm / 35) * 40)));
+    // Route 0 is typically faster in normal traffic, but alternative has higher clearance
+    const speedScore = isClosed ? 5 : Math.max(0, Math.min(100, Math.round(100 - (durMin / 60) * 45)));
+    const distScore = isClosed ? 5 : Math.max(0, Math.min(100, Math.round(100 - (distKm / 40) * 40)));
     const coverageScore = singleWaveCapacity >= pop ? 95 : Math.round((singleWaveCapacity / pop) * 90);
-    const reliabilityScore = Math.max(10, 100 - (drainsCount > 25 ? 20 : 5) - (rainfallMm > 15 ? 20 : 5));
+    const reliabilityScore = isClosed ? 5 : Math.max(10, 100 - (drainsCount > 25 ? 20 : 5) - (rainfallMm > 15 ? 20 : 5));
 
-    // Priority-weighted route score (0 to 100)
-    const compositeScore = Math.round(
-      (normalizedPriorities.safety * safetyScore +
-       normalizedPriorities.speed * speedScore +
-       normalizedPriorities.cost * distScore +
-       normalizedPriorities.coverage * coverageScore +
-       normalizedPriorities.reliability * reliabilityScore) / 100
-    );
+    // Priority-weighted composite route score (0 to 100)
+    const compositeScore = isClosed
+      ? 12
+      : Math.round(
+          (normalizedPriorities.safety * safetyScore +
+           normalizedPriorities.speed * speedScore +
+           normalizedPriorities.cost * distScore +
+           normalizedPriorities.coverage * coverageScore +
+           normalizedPriorities.reliability * reliabilityScore) / 100
+        );
 
     const name = index === 0
-      ? `Primary Staging Arterial (Route 1 · via GST / OMR Corridor)`
-      : `Alternative Bypass (Route ${index + 1} · Radial Ring Diversion)`;
+      ? `Primary Direct Corridor (Route 1 · via GST / Arterial)`
+      : `Radial Ring Bypass (Route ${index + 1} · Circumferential Elevation)`;
 
-    const tradeoff = index === 0
-      ? "Direct arterial passage from VIT Base; shortest distance but crosses localized canal catchments."
-      : "Circumferential radial bypass; slightly longer distance, avoids low-elevation canal bridge underpasses.";
+    const tradeoff = isClosed
+      ? "ROAD CLOSED: Inundated low-level canal bridge. Severely penalized and rendered infeasible."
+      : index === 0
+      ? "Direct arterial passage from VIT Base; shortest driving time, but higher stormwater drain bridge exposure."
+      : "Elevated circumferential bypass; avoids flood-prone canal crossings, preferred when Safety priority is high.";
 
     return {
       id: r.id || `route-${index + 1}`,
@@ -660,6 +711,49 @@ export function updateDecisionTwinPriorities(
   };
 }
 
+export function updateDecisionTwinRoadClosure(
+  twin: DecisionTwin,
+  closedRoads: string[]
+): DecisionTwin {
+  const now = new Date().toISOString();
+  return {
+    ...twin,
+    updatedAt: now,
+    constraints: {
+      ...twin.constraints,
+      roadClosures: {
+        ...twin.constraints.roadClosures,
+        allowedValue: closedRoads,
+        status: closedRoads.length > 0 ? "SIMULATED" : "UNAVAILABLE"
+      }
+    }
+  };
+}
+
+export function updateDecisionTwinWeatherDelta(
+  twin: DecisionTwin,
+  rainfallMultiplier: number
+): DecisionTwin {
+  const now = new Date().toISOString();
+  const currentRain = (twin.weatherContext?.rainfallMm && twin.weatherContext.rainfallMm > 0)
+    ? twin.weatherContext.rainfallMm
+    : 12; // Realistic monsoon baseline if offline
+  const updatedRain = Math.round(currentRain * rainfallMultiplier * 10) / 10;
+  return {
+    ...twin,
+    updatedAt: now,
+    weatherContext: {
+      temperatureC: twin.weatherContext?.temperatureC ?? 28,
+      rainfallMm: updatedRain,
+      precipitationProbability: twin.weatherContext?.precipitationProbability ?? 85,
+      windSpeedKmh: twin.weatherContext?.windSpeedKmh ?? 24,
+      source: twin.weatherContext?.source ?? "Open-Meteo (Simulated Surge)",
+      retrievedAt: now,
+      status: "SIMULATED"
+    }
+  };
+}
+
 export function createDefaultDecisionTwin(params: {
   placeName: string;
   lat: number;
@@ -858,14 +952,14 @@ export function createDefaultDecisionTwin(params: {
     constraints: {
       maxBudget: {
         name: "Maximum Budget",
-        allowedValue: params.budget ?? 100000,
+        allowedValue: params.budget ?? 250000,
         description: "Ceiling for fleet fueling and personnel deployment",
         source: "Disaster Management Budget Code",
         status: "USER_PROVIDED"
       },
       maxResponseTimeMinutes: {
         name: "Maximum Evacuation Window",
-        allowedValue: 180, // 3 hours
+        allowedValue: Math.max(360, Math.ceil(pop / 400) * 110), // Multi-wave evacuation window scaled with population
         description: "Maximum allowable completion window before flood crest",
         source: "SOP Guideline",
         status: "ESTIMATED"

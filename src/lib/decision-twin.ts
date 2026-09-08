@@ -67,6 +67,16 @@ export interface DecisionTwin {
   scenarioId: string;
   scenarioName: string;
   scenarioType: "Flood" | "Cyclone" | "Evacuation" | "Emergency";
+  origin?: {
+    name: string;
+    lat: number;
+    lng: number;
+    source: string;
+    status: DataSourceStatus;
+  };
+  distanceFromBaseKm?: number;
+  deploymentPriority?: "PRIORITY 1 · CRITICAL" | "PRIORITY 2 · HIGH" | "PRIORITY 3 · STANDARD";
+  resourceMode?: "MODE_A_PREDEFINED" | "MODE_B_DYNAMIC";
   location: {
     name: string;
     lat: number;
@@ -76,7 +86,7 @@ export interface DecisionTwin {
   };
   hazard: {
     type: "Flood";
-    severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
+    severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "MODERATE";
     description: string;
     waterLevel: ValueWithMetadata<string>;
     waterMovement: ValueWithMetadata<string>;
@@ -205,12 +215,31 @@ export interface RouteScoreEvaluation {
   tradeoffRationale: string;
 }
 
+export interface ResourceAnalysis {
+  mode: "MODE_A_PREDEFINED" | "MODE_B_DYNAMIC";
+  busesNeeded: number;
+  boatsNeeded: number;
+  ambulancesNeeded: number;
+  rescueTeamsNeeded: number;
+  busesDiff: number;
+  boatsDiff: number;
+  ambulancesDiff: number;
+  unusedCapacity: number;
+  shortfallCapacity: number;
+  status: "SURPLUS" | "BALANCED" | "DEFICIT";
+}
+
 export interface SimulationResult {
   scenarioId: string;
   feasible: boolean;
   score: number;
   evacuationTimeMinutes: number;
   totalDistanceKm: number;
+  distanceFromBaseKm?: number;
+  deploymentPriority?: "PRIORITY 1 · CRITICAL" | "PRIORITY 2 · HIGH" | "PRIORITY 3 · STANDARD";
+  resourceMode?: "MODE_A_PREDEFINED" | "MODE_B_DYNAMIC";
+  resourceAnalysis?: ResourceAnalysis;
+  recommendedPlan?: string;
   estimatedCostInr: number;
   riskScore: number;
   totalCapacity: number;
@@ -235,6 +264,21 @@ export interface SimulationResult {
     weightedTotal: number;
   };
   explanation: string;
+}
+
+// ==========================================
+// DISTANCE & GEOGRAPHY UTILITIES
+// ==========================================
+
+export function calculateHaversineDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // Earth's mean radius in km
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c * 10) / 10;
 }
 
 // ==========================================
@@ -623,6 +667,52 @@ export function simulateDeterministicDecisionTwin(twin: DecisionTwin): Simulatio
 
   const finalScore = feasible ? weightedTotal : Math.min(48, weightedTotal);
 
+  // Dynamic AI Optimal Fleet calculation
+  const sev = twin.hazard.severity;
+  const optimalBuses = Math.min(30, Math.max(4, Math.ceil(pop / 350)));
+  const optimalBoats =
+    sev === "CRITICAL"
+      ? Math.min(16, Math.max(4, Math.ceil(pop / 600)))
+      : sev === "HIGH"
+      ? Math.min(10, Math.max(2, Math.ceil(pop / 900)))
+      : Math.min(6, Math.max(1, Math.ceil(pop / 1800)));
+  const optimalAmbulances = Math.min(15, Math.max(3, Math.ceil(pop / 500)));
+  const optimalTeams = Math.min(40, Math.max(6, Math.ceil(pop / 250)));
+
+  const isModeA = twin.resourceMode === "MODE_A_PREDEFINED";
+  const singleWaveDeficit = Math.max(0, pop - singleWaveCapacity);
+  const unusedCapacity = Math.max(0, totalPlannedCapacity - pop);
+  const resourceStatus = singleWaveCapacity >= pop ? "SURPLUS" : singleWaveDeficit > 0 && wavesRequired > 3 ? "DEFICIT" : "BALANCED";
+
+  const resourceAnalysis: ResourceAnalysis = {
+    mode: isModeA ? "MODE_A_PREDEFINED" : "MODE_B_DYNAMIC",
+    busesNeeded: optimalBuses,
+    boatsNeeded: optimalBoats,
+    ambulancesNeeded: optimalAmbulances,
+    rescueTeamsNeeded: optimalTeams,
+    busesDiff: buses - optimalBuses,
+    boatsDiff: boats - optimalBoats,
+    ambulancesDiff: ambulances - optimalAmbulances,
+    unusedCapacity,
+    shortfallCapacity: singleWaveDeficit,
+    status: resourceStatus
+  };
+
+  const distFromBase =
+    twin.distanceFromBaseKm ??
+    primaryDistanceKm ??
+    calculateHaversineDistanceKm(12.8406, 80.1534, twin.location.lat, twin.location.lng);
+
+  const deploymentPriority: "PRIORITY 1 · CRITICAL" | "PRIORITY 2 · HIGH" | "PRIORITY 3 · STANDARD" =
+    twin.deploymentPriority ??
+    (sev === "CRITICAL" || pop >= 4000 || (selectedRoute && selectedRoute.riskScore >= 70)
+      ? "PRIORITY 1 · CRITICAL"
+      : sev === "HIGH" || pop >= 2000 || (selectedRoute && selectedRoute.riskScore >= 45)
+      ? "PRIORITY 2 · HIGH"
+      : "PRIORITY 3 · STANDARD");
+
+  const recommendedPlan = `OPERATIONAL DIRECTIVE · ${deploymentPriority}: Dispatch emergency task force from VIT Chennai Base Hub to ${twin.location.name} (${primaryDistanceKm} km corridor, ~${oneWayTravelMinutes} min transit via ${selectedRoute?.name ?? "Primary Route"}). Deploying ${buses} buses (${busWaveCap} seats/wave), ${boats} rescue craft, ${ambulances} ambulances, and ${teams} rescue teams across ${wavesRequired} evacuation wave(s). Total operational evacuation duration is ${evacuationTimeMinutes} min with projected expenditure of ₹${estimatedCostInr.toLocaleString()}.`;
+
   const explanation = feasible
     ? `The simulation confirms feasibility with an overall readiness score of ${finalScore}/100. Priority weighting (Safety: ${normalizedPriorities.safety}%, Speed: ${normalizedPriorities.speed}%, Cost: ${normalizedPriorities.cost}%) selected the ${selectedRoute?.name ?? "primary route"}. Total estimated evacuation time is ${evacuationTimeMinutes} minutes across ${wavesRequired} wave(s), with operational cost estimated at ₹${estimatedCostInr.toLocaleString()}.`
     : `The current configuration is INFEASIBLE (Score: ${finalScore}/100) due to ${criticalViolations.length} critical constraint breach(es): ${criticalViolations.map((c) => c.constraint).join(", ")}. Immediate resource reallocation required.`;
@@ -633,6 +723,11 @@ export function simulateDeterministicDecisionTwin(twin: DecisionTwin): Simulatio
     score: finalScore,
     evacuationTimeMinutes,
     totalDistanceKm: primaryDistanceKm,
+    distanceFromBaseKm: distFromBase,
+    deploymentPriority,
+    resourceMode: isModeA ? "MODE_A_PREDEFINED" : "MODE_B_DYNAMIC",
+    resourceAnalysis,
+    recommendedPlan,
     estimatedCostInr,
     riskScore: selectedRoute ? selectedRoute.riskScore : baseRiskScore,
     totalCapacity: totalPlannedCapacity,
@@ -781,6 +876,10 @@ export function createDefaultDecisionTwin(params: {
   gis?: { roads: number; buildings: number; drains: number; rivers: number; bridges: number; source: string; status: string } | null;
   hospitals?: Hospital[];
   routes?: RouteOption[];
+  severity?: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "MODERATE";
+  resourceMode?: "MODE_A_PREDEFINED" | "MODE_B_DYNAMIC";
+  distanceFromBaseKm?: number;
+  origin?: { name: string; lat: number; lng: number; source: string; status: DataSourceStatus };
 }): DecisionTwin {
   const now = new Date().toISOString();
   const pop = params.population ?? 3500;
@@ -830,10 +929,40 @@ export function createDefaultDecisionTwin(params: {
     { label: "Hospital Capacity", source: "State Health Desk", sourceType: "NONE", status: "UNAVAILABLE" as const, retrievedAt: now, confidence: 0.0 }
   ];
 
+  const computedDist =
+    params.distanceFromBaseKm ??
+    calculateHaversineDistanceKm(12.8406, 80.1534, params.lat, params.lng);
+
+  const rainfallMm = params.weather?.rainfallMm ?? 0;
+  const riversCount = params.gis?.rivers ?? 0;
+  const drainsCount = params.gis?.drains ?? 0;
+  const severityVal =
+    params.severity ??
+    (rainfallMm > 20 || riversCount > 4 || historical.localityRiskLevel === "VERY_HIGH"
+      ? "CRITICAL"
+      : rainfallMm > 5 || drainsCount > 15 || historical.localityRiskLevel === "HIGH"
+      ? "HIGH"
+      : "MODERATE");
+
   return {
     scenarioId: `DT-CHN-${Date.now().toString(36).toUpperCase()}`,
     scenarioName: `Emergency Evacuation · ${params.placeName}`,
     scenarioType: "Flood",
+    origin: params.origin ?? {
+      name: "VIT Chennai (Base Hub)",
+      lat: 12.8406,
+      lng: 80.1534,
+      source: "FIXED_BASE_ORIGIN",
+      status: "VERIFIED"
+    },
+    distanceFromBaseKm: computedDist,
+    resourceMode: params.resourceMode ?? "MODE_B_DYNAMIC",
+    deploymentPriority:
+      severityVal === "CRITICAL" || pop >= 4000
+        ? "PRIORITY 1 · CRITICAL"
+        : severityVal === "HIGH" || pop >= 2000
+        ? "PRIORITY 2 · HIGH"
+        : "PRIORITY 3 · STANDARD",
     location: {
       name: params.placeName,
       lat: params.lat,
@@ -843,7 +972,7 @@ export function createDefaultDecisionTwin(params: {
     },
     hazard: {
       type: "Flood",
-      severity: historical.localityRiskLevel === "VERY_HIGH" ? "CRITICAL" : "HIGH",
+      severity: severityVal,
       description: `Monsoon flood inundation in ${params.placeName}. Road waterlogging and canal backflow risk.`,
       waterLevel: {
         value: "Knee level (15–50 cm)",
@@ -1103,9 +1232,15 @@ type CandidateStrategy = {
   tradeoff: string;
 };
 
-export function parseScenario(prompt: string): ScenarioInput {
+export function parseScenario(prompt: string): ScenarioInput & { mode: "MODE_A_PREDEFINED" | "MODE_B_DYNAMIC" } {
   const lower = prompt.toLowerCase();
   const place = extractPlace(prompt);
+
+  const hasExplicitBuses = /\b\d+\s*buses?\b/i.test(prompt);
+  const hasExplicitBoats = /\b\d+\s*(?:rescue\s*)?boats?\b/i.test(prompt);
+  const hasExplicitAmbulances = /\b\d+\s*ambulances?\b/i.test(prompt);
+  const mode: "MODE_A_PREDEFINED" | "MODE_B_DYNAMIC" =
+    hasExplicitBuses || hasExplicitBoats || hasExplicitAmbulances ? "MODE_A_PREDEFINED" : "MODE_B_DYNAMIC";
 
   const prioritiesWeights = (text: string) => {
     const l = text.toLowerCase();
@@ -1117,6 +1252,7 @@ export function parseScenario(prompt: string): ScenarioInput {
   return {
     prompt,
     place,
+    mode,
     scenarioType: lower.includes("flood") ? "flood" : lower.includes("evac") ? "evacuation" : "emergency",
     severity: lower.includes("severe") || lower.includes("critical") || lower.includes("heavy") ? "high" : "medium",
     population: numberFrom(prompt, /([\d,]+)\s*(?:people|persons|residents|inside)/i, 3500),

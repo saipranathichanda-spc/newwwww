@@ -62,6 +62,14 @@ export function DecisionTwinSimulationPanel({
   const [customLocationInput, setCustomLocationInput] = useState("");
   const [customPopulation, setCustomPopulation] = useState(3500);
 
+  // Dynamic Vehicle / Resource Input Mode (Mode B = Dynamic AI, Mode A = User Predefined)
+  const [resourceMode, setResourceMode] = useState<"MODE_B_DYNAMIC" | "MODE_A_PREDEFINED">("MODE_B_DYNAMIC");
+  const [customBuses, setCustomBuses] = useState(10);
+  const [customBoats, setCustomBoats] = useState(3);
+  const [customAmbulances, setCustomAmbulances] = useState(5);
+  const [customTeams, setCustomTeams] = useState(20);
+  const [customBudget, setCustomBudget] = useState(350000);
+
   // Dynamic Destination Selection
   const currentPreset = useMemo(() => {
     return getScenarioPreset(twin.location.name) || SCENARIO_PRESETS[0];
@@ -174,35 +182,40 @@ export function DecisionTwinSimulationPanel({
     executeMonteCarlo(twin, mcIterations, newSeed);
   }
 
-  // Universal Scenario Builder for ANY Chennai Location (e.g. T Nagar, Anna Nagar, Adyar, Mylapore...)
-  async function handleBuildScenario(placeName: string, pop: number = customPopulation) {
+  // Universal Scenario Builder for ANY Chennai Location (e.g. Marina Mall, T Nagar, Velachery, Central, Adyar...)
+  async function handleBuildScenario(
+    placeName: string,
+    pop: number = customPopulation,
+    modeOverride?: "MODE_B_DYNAMIC" | "MODE_A_PREDEFINED"
+  ) {
     const trimmed = placeName.trim();
     if (!trimmed) return;
     setLoadingBackend(true);
     setIsRoute1Closed(false);
     setIsSurgeRainfall(false);
 
-    // Auto-calculate realistic required vehicles based on population
-    const autoBuses = Math.min(25, Math.max(4, Math.ceil(pop / 350)));
-    const autoBoats = Math.min(12, Math.max(2, Math.ceil(pop / 800)));
-    const autoAmbulances = Math.min(12, Math.max(3, Math.ceil(pop / 600)));
-    const autoTeams = Math.min(30, Math.max(6, Math.ceil(pop / 200)));
-    const autoBudget = Math.max(500000, Math.ceil(pop * 180));
+    const activeMode = modeOverride ?? resourceMode;
 
     try {
+      const payload: Record<string, unknown> = {
+        place: trimmed,
+        population: pop,
+        mode: activeMode,
+        priorities: twin.priorities
+      };
+
+      if (activeMode === "MODE_A_PREDEFINED") {
+        payload.buses = customBuses;
+        payload.boats = customBoats;
+        payload.ambulances = customAmbulances;
+        payload.rescueTeams = customTeams;
+        payload.budget = customBudget;
+      }
+
       const res = await fetch("/api/decision/build", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          place: trimmed,
-          population: pop,
-          buses: autoBuses,
-          boats: autoBoats,
-          ambulances: autoAmbulances,
-          rescueTeams: autoTeams,
-          budget: autoBudget,
-          priorities: twin.priorities
-        })
+        body: JSON.stringify(payload)
       });
 
       if (res.ok) {
@@ -220,6 +233,12 @@ export function DecisionTwinSimulationPanel({
       const lat = match ? match[1].lat : 13.0418;
       const lng = match ? match[1].lng : 80.2341;
 
+      const autoBuses = activeMode === "MODE_A_PREDEFINED" ? customBuses : Math.min(25, Math.max(4, Math.ceil(pop / 350)));
+      const autoBoats = activeMode === "MODE_A_PREDEFINED" ? customBoats : Math.min(12, Math.max(2, Math.ceil(pop / 800)));
+      const autoAmbulances = activeMode === "MODE_A_PREDEFINED" ? customAmbulances : Math.min(12, Math.max(3, Math.ceil(pop / 600)));
+      const autoTeams = activeMode === "MODE_A_PREDEFINED" ? customTeams : Math.min(30, Math.max(6, Math.ceil(pop / 200)));
+      const autoBudget = activeMode === "MODE_A_PREDEFINED" ? customBudget : Math.max(500000, Math.ceil(pop * 180));
+
       const fallbackTwin = createDefaultDecisionTwin({
         placeName: match ? match[1].label : `${trimmed}, Chennai`,
         lat,
@@ -230,6 +249,7 @@ export function DecisionTwinSimulationPanel({
         ambulances: autoAmbulances,
         rescueTeams: autoTeams,
         budget: autoBudget,
+        resourceMode: activeMode,
         priorities: twin.priorities
       });
       setTwin(fallbackTwin);
@@ -267,7 +287,8 @@ export function DecisionTwinSimulationPanel({
               City-Scale Emergency Response & Resource Orchestration
             </h2>
             <p className="mt-0.5 text-xs text-[#9aabc1]">
-              Enter ANY location in Chennai (e.g. T Nagar, Anna Nagar, Adyar...) or prompt. Calculates vehicle fleet, best route from VIT Chennai Hub, deterministic feasibility, and 1,000 Monte Carlo iterations.
+              Enter ANY location in Chennai (e.g. Marina Mall, T Nagar, Velachery, Central, Tambaram, Adyar...) or scenario prompt.
+              Routes and distances are dynamically evaluated from permanent <b>VIT Chennai Base Hub</b>.
             </p>
           </div>
 
@@ -287,6 +308,10 @@ export function DecisionTwinSimulationPanel({
             <span className="rounded-full border border-[#39d4b4]/40 bg-[#113c3d] px-3 py-1 font-mono text-xs font-bold text-[#69e8d1]">
               Score: {result.score}/100
             </span>
+
+            <span className="rounded-full border border-blue-500/40 bg-blue-950/40 px-3 py-1 font-mono text-xs font-bold text-blue-300">
+              {resourceMode === "MODE_B_DYNAMIC" ? "Mode B: AI Fleet Sizing" : "Mode A: Custom Fleet"}
+            </span>
           </div>
         </div>
 
@@ -294,10 +319,10 @@ export function DecisionTwinSimulationPanel({
         <div className="mt-4 rounded-xl border border-[#23354d] bg-[#07111f] p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <label className="text-xs font-bold text-[#39d4b4] uppercase tracking-wider flex items-center gap-1.5">
-              <span>📍</span> ENTER ANY CHENNAI LOCATION OR EMERGENCY SCENARIO
+              <span>📍</span> SEARCH ANY REAL-WORLD LOCATION OR EMERGENCY SCENARIO
             </label>
             <span className="text-[11px] text-[#9aabc1]">
-              Origin: <b>VIT Chennai Base Hub</b> (Permanent Dispatch)
+              Dispatch Origin: <b>VIT Chennai Base Hub</b> (Permanent Hub · 12.8406° N, 80.1534° E)
             </span>
           </div>
 
@@ -311,12 +336,12 @@ export function DecisionTwinSimulationPanel({
                   handleBuildScenario(customLocationInput);
                 }
               }}
-              placeholder="e.g. T Nagar, Anna Nagar, Mylapore, Porur, or 'Severe flood in T Nagar evacuate 3000 people'..."
+              placeholder="Type ANY location (e.g. Marina Mall, T Nagar, Anna Nagar, Adyar...) or prompt..."
               className="flex-1 min-w-[280px] rounded-xl border border-[#39506e] bg-[#10233a] px-4 py-2.5 text-sm text-white placeholder-[#5a708c] outline-none focus:border-[#39d4b4]"
             />
             <button
               type="button"
-              onClick={() => handleBuildScenario(customLocationInput || "T Nagar, Chennai")}
+              onClick={() => handleBuildScenario(customLocationInput || "Marina Mall")}
               disabled={loadingBackend}
               className="flex items-center gap-2 rounded-xl bg-[#39d4b4] px-5 py-2.5 text-xs font-bold text-[#062019] transition-all hover:bg-[#2ec2a3] disabled:opacity-50 shadow-lg shadow-[#39d4b4]/20"
             >
@@ -324,9 +349,123 @@ export function DecisionTwinSimulationPanel({
             </button>
           </div>
 
+          {/* SIZING MODE SELECTOR TOGGLE */}
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#1a2d42] pt-3">
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-[#9aabc1] text-[11px] font-semibold">Fleet Sizing Mode:</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setResourceMode("MODE_B_DYNAMIC");
+                  if (customLocationInput.trim()) handleBuildScenario(customLocationInput, customPopulation, "MODE_B_DYNAMIC");
+                }}
+                className={`rounded-lg border px-3 py-1 text-xs font-bold transition-all ${
+                  resourceMode === "MODE_B_DYNAMIC"
+                    ? "border-[#39d4b4] bg-[#39d4b4]/20 text-[#69e8d1] shadow"
+                    : "border-[#39506e]/50 bg-[#10233a] text-[#9aabc1] hover:border-[#39d4b4]/50 hover:text-white"
+                }`}
+              >
+                ⚡ Mode B: AI Dynamic Auto-Sizing (Optimal Fleet from Scratch)
+              </button>
+              <button
+                type="button"
+                onClick={() => setResourceMode("MODE_A_PREDEFINED")}
+                className={`rounded-lg border px-3 py-1 text-xs font-bold transition-all ${
+                  resourceMode === "MODE_A_PREDEFINED"
+                    ? "border-amber-400 bg-amber-500/20 text-amber-200 shadow"
+                    : "border-[#39506e]/50 bg-[#10233a] text-[#9aabc1] hover:border-amber-400/50 hover:text-white"
+                }`}
+              >
+                🛠️ Mode A: Predefined Fleet (Plan with Custom Vehicle Allocation)
+              </button>
+            </div>
+
+            {/* Population Input */}
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-[#9aabc1] text-[11px]">Affected Population:</span>
+              <input
+                type="number"
+                value={customPopulation}
+                onChange={(e) => setCustomPopulation(Math.max(100, Number(e.target.value)))}
+                className="w-24 rounded-lg border border-[#39506e] bg-[#10233a] px-2 py-1 text-xs text-white outline-none focus:border-[#39d4b4]"
+              />
+            </div>
+          </div>
+
+          {/* MODE A EXPANDED CONTROLS */}
+          {resourceMode === "MODE_A_PREDEFINED" && (
+            <div className="mt-3 rounded-xl border border-amber-500/30 bg-[#1b231c] p-3 text-xs">
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-bold text-amber-300 flex items-center gap-1.5">
+                  <span>🛠️</span> MODE A CUSTOM RESOURCE ALLOCATION (User-Defined Capacity)
+                </span>
+                <span className="text-[11px] text-[#9aabc1]">
+                  AI will evaluate sufficiency, surplus/shortfall, and wave staging using only these vehicles.
+                </span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                <div>
+                  <label className="text-[10px] text-[#9aabc1] block">Buses (50 cap)</label>
+                  <input
+                    type="number"
+                    value={customBuses}
+                    onChange={(e) => setCustomBuses(Math.max(0, Number(e.target.value)))}
+                    className="w-full rounded border border-[#39506e] bg-[#0d1b2d] px-2 py-1 text-xs text-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-[#9aabc1] block">Boats (20 cap)</label>
+                  <input
+                    type="number"
+                    value={customBoats}
+                    onChange={(e) => setCustomBoats(Math.max(0, Number(e.target.value)))}
+                    className="w-full rounded border border-[#39506e] bg-[#0d1b2d] px-2 py-1 text-xs text-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-[#9aabc1] block">Ambulances</label>
+                  <input
+                    type="number"
+                    value={customAmbulances}
+                    onChange={(e) => setCustomAmbulances(Math.max(0, Number(e.target.value)))}
+                    className="w-full rounded border border-[#39506e] bg-[#0d1b2d] px-2 py-1 text-xs text-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-[#9aabc1] block">Rescue Teams</label>
+                  <input
+                    type="number"
+                    value={customTeams}
+                    onChange={(e) => setCustomTeams(Math.max(0, Number(e.target.value)))}
+                    className="w-full rounded border border-[#39506e] bg-[#0d1b2d] px-2 py-1 text-xs text-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-[#9aabc1] block">Budget (₹)</label>
+                  <input
+                    type="number"
+                    value={customBudget}
+                    onChange={(e) => setCustomBudget(Math.max(50000, Number(e.target.value)))}
+                    className="w-full rounded border border-[#39506e] bg-[#0d1b2d] px-2 py-1 text-xs text-white"
+                  />
+                </div>
+              </div>
+              <div className="mt-2.5 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => handleBuildScenario(customLocationInput || twin.location.name, customPopulation, "MODE_A_PREDEFINED")}
+                  disabled={loadingBackend}
+                  className="rounded-lg bg-amber-400 px-4 py-1 text-xs font-bold text-black hover:bg-amber-300"
+                >
+                  ⚡ Re-simulate with Custom Fleet
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Quick Location Chips */}
           <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs">
-            <span className="text-[#9aabc1] text-[11px]">Quick Hotspots:</span>
+            <span className="text-[#9aabc1] text-[11px]">Quick Shortcuts (Same dynamic pipeline):</span>
             {["T Nagar", "Velachery", "Chennai Central", "Tambaram", "Adyar", "Anna Nagar", "Guindy", "Porur", "Mylapore"].map((place) => {
               const isCurrent = twin.location.name.toLowerCase().includes(place.toLowerCase());
               return (
@@ -335,7 +474,7 @@ export function DecisionTwinSimulationPanel({
                   type="button"
                   onClick={() => {
                     setCustomLocationInput(place);
-                    handleBuildScenario(place);
+                    handleBuildScenario(place, customPopulation, resourceMode);
                   }}
                   disabled={loadingBackend}
                   className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors ${
@@ -352,8 +491,175 @@ export function DecisionTwinSimulationPanel({
         </div>
       </div>
 
-      {/* 2. AUTOMATIC BEST-ROUTE SUMMARY CARD */}
-      <div className="mt-5 rounded-xl border border-[#39d4b4]/30 bg-[#0a232b] p-4 text-xs">
+      {/* 2. DYNAMIC INCIDENT ASSESSMENT & MISSION OVERVIEW CARD */}
+      <div className="mt-5 grid grid-cols-1 md:grid-cols-4 gap-3">
+        {/* Card 1: Target Location & Base Proximity */}
+        <div className="rounded-xl border border-[#23354d] bg-[#07111f] p-4 text-xs">
+          <div className="flex items-center gap-2 text-[#9aabc1] text-[11px] mb-1">
+            <span>📍</span> TARGET INCIDENT LOCATION
+          </div>
+          <p className="font-bold text-sm text-white truncate" title={twin.location.name}>
+            {twin.location.name}
+          </p>
+          <div className="mt-2 space-y-1 text-[11px] text-[#9aabc1]">
+            <p>
+              Coords: <b className="text-white">{twin.location.lat.toFixed(4)}° N, {twin.location.lng.toFixed(4)}° E</b>
+            </p>
+            <p>
+              Staging Base: <b className="text-[#39d4b4]">VIT Chennai Base Hub</b>
+            </p>
+          </div>
+          <div className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-[#39d4b4]/40 bg-[#39d4b4]/10 px-2.5 py-1 text-xs font-mono font-bold text-[#69e8d1]">
+            <span>📏</span> {result.distanceFromBaseKm ?? bestRoute?.distanceKm} km from VIT Base
+          </div>
+        </div>
+
+        {/* Card 2: Dynamic Flood Severity & Risk */}
+        <div className="rounded-xl border border-[#23354d] bg-[#07111f] p-4 text-xs">
+          <div className="flex items-center gap-2 text-[#9aabc1] text-[11px] mb-1">
+            <span>🌊</span> FLOOD SEVERITY & POPULATION
+          </div>
+          <div className="flex items-center gap-2 mt-1">
+            <span
+              className={`rounded px-2 py-0.5 font-mono text-xs font-bold ${
+                twin.hazard.severity === "CRITICAL"
+                  ? "bg-red-500/20 text-red-300 border border-red-500/40"
+                  : twin.hazard.severity === "HIGH"
+                  ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                  : "bg-blue-500/20 text-blue-300 border border-blue-500/40"
+              }`}
+            >
+              {twin.hazard.severity} SEVERITY
+            </span>
+          </div>
+          <div className="mt-2 text-[11px] text-[#9aabc1] space-y-1">
+            <p>
+              People at Risk: <b className="text-white font-mono text-sm">{twin.estimatedPopulation.value.toLocaleString()}</b>
+            </p>
+            <p>
+              Planning Range: <b className="text-white">{twin.uncertainties.planningRange}</b> ({twin.uncertainties.populationLower.toLocaleString()}–{twin.uncertainties.populationUpper.toLocaleString()})
+            </p>
+          </div>
+        </div>
+
+        {/* Card 3: Priority Level & Feasibility */}
+        <div className="rounded-xl border border-[#23354d] bg-[#07111f] p-4 text-xs">
+          <div className="flex items-center gap-2 text-[#9aabc1] text-[11px] mb-1">
+            <span>🚨</span> DISPATCH PRIORITY LEVEL
+          </div>
+          <div className="mt-1">
+            <span className="rounded bg-red-950/60 border border-red-500/40 px-2 py-0.5 font-mono text-xs font-bold text-red-300">
+              {result.deploymentPriority ?? "PRIORITY 1 · CRITICAL"}
+            </span>
+          </div>
+          <div className="mt-2 text-[11px] text-[#9aabc1] space-y-1">
+            <p>
+              Corridor Risk Index: <b className="text-amber-300 font-mono">{bestRoute?.riskScore ?? result.riskScore}/100</b>
+            </p>
+            <p>
+              Feasibility: <b className={result.feasible ? "text-emerald-400" : "text-red-400"}>{result.feasible ? "OPERATIONAL" : "CONSTRAINTS EXCEEDED"}</b>
+            </p>
+          </div>
+        </div>
+
+        {/* Card 4: Mission Timeline & Budget */}
+        <div className="rounded-xl border border-[#23354d] bg-[#07111f] p-4 text-xs">
+          <div className="flex items-center gap-2 text-[#9aabc1] text-[11px] mb-1">
+            <span>⏱️</span> LOGISTICS & FINANCIALS
+          </div>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="font-mono text-xl font-bold text-white">{result.evacuationTimeMinutes} min</span>
+            <span className="text-[11px] text-[#9aabc1]">({(result.evacuationTimeMinutes / 60).toFixed(1)} hrs)</span>
+          </div>
+          <div className="mt-2 text-[11px] text-[#9aabc1] space-y-1">
+            <p>
+              Evacuation Waves: <b className="text-white font-mono">{result.wavesRequired} wave(s)</b>
+            </p>
+            <p>
+              Estimated Cost: <b className="text-emerald-300 font-mono">₹{result.estimatedCostInr.toLocaleString()}</b>
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* 3. DYNAMIC RESOURCE DIRECTIVE & CAPACITY CARD */}
+      <div className="mt-4 rounded-xl border border-[#39d4b4]/30 bg-[#0a232b] p-4 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="text-[10px] font-bold tracking-wider text-[#39d4b4] flex items-center gap-1.5">
+              <span>🛡️</span>
+              {twin.resourceMode === "MODE_A_PREDEFINED" ? "MODE A ALLOCATED FLEET & CAPACITY DIRECTIVE:" : "MODE B AI OPTIMAL FLEET & DISPATCH DIRECTIVE:"}
+            </p>
+            <p className="mt-1 text-sm font-bold text-white">
+              Deploy from VIT Base:{" "}
+              <span className="text-[#39d4b4]">{twin.resources.buses.value} Buses</span> ·{" "}
+              <span className="text-cyan-300">{twin.resources.boats.value} Rescue Boats</span> ·{" "}
+              <span className="text-red-300">{twin.resources.ambulances.value} Ambulances</span> ·{" "}
+              <span className="text-emerald-300">{twin.resources.rescueTeams.value} Rescue Teams</span>
+            </p>
+            <p className="mt-0.5 text-xs text-[#b6c4d5]">
+              Single-wave capacity: <b>{result.singleWaveCapacity} citizens/wave</b> · Total mission throughput: <b>{result.totalCapacity.toLocaleString()} citizens</b> across <b>{result.wavesRequired} wave(s)</b>.
+            </p>
+          </div>
+
+          {/* Mode A / Mode B status indicator */}
+          <div className="text-right">
+            {result.resourceAnalysis?.status === "SURPLUS" && (
+              <span className="rounded-full bg-emerald-950/60 border border-emerald-500/40 px-3 py-1 text-xs font-mono font-bold text-emerald-300">
+                ✅ Fleet Capacity Surplus (+{result.resourceAnalysis.unusedCapacity} seats)
+              </span>
+            )}
+            {result.resourceAnalysis?.status === "DEFICIT" && (
+              <span className="rounded-full bg-red-950/60 border border-red-500/40 px-3 py-1 text-xs font-mono font-bold text-red-300">
+                ⚠️ Capacity Shortfall ({result.resourceAnalysis.shortfallCapacity} unevacuated in wave 1)
+              </span>
+            )}
+            {result.resourceAnalysis?.status === "BALANCED" && (
+              <span className="rounded-full bg-blue-950/60 border border-blue-500/40 px-3 py-1 text-xs font-mono font-bold text-blue-300">
+                ⚖️ Balanced Fleet Throughput
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Mode A Comparative Breakdown */}
+        {twin.resourceMode === "MODE_A_PREDEFINED" && result.resourceAnalysis && (
+          <div className="mt-3 border-t border-[#1a3c42] pt-2.5 text-[11px] grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div className="rounded bg-[#071f25] p-2">
+              <span className="text-[#9aabc1] block text-[10px]">Buses: Allocated vs Needed</span>
+              <span className="font-bold text-white">{twin.resources.buses.value} allocated</span> /{" "}
+              <span className="text-[#39d4b4]">{result.resourceAnalysis.busesNeeded} needed</span>
+              <span className="block text-[10px] text-cyan-300 mt-0.5">
+                {result.resourceAnalysis.busesDiff >= 0 ? `+${result.resourceAnalysis.busesDiff} surplus` : `${result.resourceAnalysis.busesDiff} deficit`}
+              </span>
+            </div>
+            <div className="rounded bg-[#071f25] p-2">
+              <span className="text-[#9aabc1] block text-[10px]">Boats: Allocated vs Needed</span>
+              <span className="font-bold text-white">{twin.resources.boats.value} allocated</span> /{" "}
+              <span className="text-[#39d4b4]">{result.resourceAnalysis.boatsNeeded} needed</span>
+              <span className="block text-[10px] text-cyan-300 mt-0.5">
+                {result.resourceAnalysis.boatsDiff >= 0 ? `+${result.resourceAnalysis.boatsDiff} surplus` : `${result.resourceAnalysis.boatsDiff} deficit`}
+              </span>
+            </div>
+            <div className="rounded bg-[#071f25] p-2">
+              <span className="text-[#9aabc1] block text-[10px]">Ambulances: Allocated vs Needed</span>
+              <span className="font-bold text-white">{twin.resources.ambulances.value} allocated</span> /{" "}
+              <span className="text-[#39d4b4]">{result.resourceAnalysis.ambulancesNeeded} needed</span>
+              <span className="block text-[10px] text-cyan-300 mt-0.5">
+                {result.resourceAnalysis.ambulancesDiff >= 0 ? `+${result.resourceAnalysis.ambulancesDiff} surplus` : `${result.resourceAnalysis.ambulancesDiff} deficit`}
+              </span>
+            </div>
+            <div className="rounded bg-[#071f25] p-2">
+              <span className="text-[#9aabc1] block text-[10px]">Unused Seat Margin</span>
+              <span className="font-bold text-emerald-300">{result.resourceAnalysis.unusedCapacity.toLocaleString()} seats</span>
+              <span className="block text-[10px] text-[#9aabc1] mt-0.5">Across {result.wavesRequired} waves</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 4. AUTOMATIC BEST-ROUTE & OPERATIONAL PLAN SUMMARY */}
+      <div className="mt-4 rounded-xl border border-[#39d4b4]/30 bg-[#0a232b] p-4 text-xs">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#39d4b4]/20 text-base">
@@ -361,7 +667,7 @@ export function DecisionTwinSimulationPanel({
             </span>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-bold tracking-wide text-[#69e8d1]">AUTOMATIC BEST CORRIDOR:</span>
+                <span className="font-bold tracking-wide text-[#69e8d1]">RECOMMENDED TRANSIT CORRIDOR:</span>
                 <span className="rounded bg-[#39d4b4]/20 px-2 py-0.5 font-mono text-[11px] font-bold text-white">
                   {bestRoute?.name || "Route 1"}
                 </span>
@@ -389,29 +695,13 @@ export function DecisionTwinSimulationPanel({
           </div>
         </div>
 
-        {/* MANDATORY VEHICLE & RESCUE DIRECTIVE */}
-        <div className="mt-3 rounded-lg border border-[#39d4b4]/40 bg-[#071f25] p-3.5">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <p className="text-[10px] font-bold tracking-wider text-[#39d4b4]">
-                MANDATORY RESCUE VEHICLE & ROUTE DISPATCH DIRECTIVE:
-              </p>
-              <p className="mt-1 text-sm font-bold text-white">
-                Deploy from VIT Chennai Base:{" "}
-                <span className="text-[#39d4b4]">{twin.resources.buses.value} Buses</span> ·{" "}
-                <span className="text-cyan-300">{twin.resources.boats.value} Rescue Boats</span> ·{" "}
-                <span className="text-red-300">{twin.resources.ambulances.value} Ambulances</span> ·{" "}
-                <span className="text-emerald-300">{twin.resources.rescueTeams.value} Rescue Teams</span>
-              </p>
-              <p className="mt-0.5 text-xs text-[#9aabc1]">
-                Corridor: <b>{bestRoute?.name}</b> ({bestRoute?.distanceKm} km · ~{bestRoute?.travelMinutes} min). Fleet throughput: <b>{result.singleWaveCapacity} citizens/wave</b> across <b>{result.wavesRequired} wave(s)</b>.
-              </p>
-            </div>
-            <span className="rounded-full bg-[#113c3d] px-3 py-1 text-xs font-mono font-bold text-[#69e8d1] border border-[#39d4b4]/30">
-              VIT Base → {twin.location.name}
-            </span>
+        {/* Dynamic Operational Response Plan Narrative */}
+        {result.recommendedPlan && (
+          <div className="mt-3 rounded-lg border border-[#23354d] bg-[#07111f] p-3 text-[11px] text-[#cbd5e1] leading-relaxed">
+            <span className="font-bold text-[#39d4b4] block mb-1">📋 RECOMMENDED OPERATIONAL RESPONSE PLAN:</span>
+            {result.recommendedPlan}
           </div>
-        </div>
+        )}
 
         {/* Destination & Transparency metadata */}
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#1a3c42] pt-2.5 text-[11px]">

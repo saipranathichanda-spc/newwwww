@@ -110,17 +110,21 @@ export function ChennaiMap({
 
     if (!matched) {
       try {
-        const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(trimmed + ", Chennai, Tamil Nadu")}`;
-        const response = await fetch(url, { headers: { "User-Agent": "Astra-Chennai-Decision-Twin/1.0" } });
-        if (response.ok) {
-          const data = await response.json();
-          if (data[0]) {
-            matched = {
-              name: data[0].display_name ?? trimmed,
-              lng: Number(data[0].lon),
-              lat: Number(data[0].lat),
-            };
-          }
+        const clean = trimmed.replace(/(?:,\s*chennai)?(?:,\s*tamil\s*nadu)?$/i, "").trim();
+        const url1 = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&viewbox=79.8,13.4,80.4,12.6&bounded=0&q=${encodeURIComponent(clean + ", Tamil Nadu")}`;
+        let response = await fetch(url1, { headers: { "User-Agent": "Astra-Chennai-Decision-Twin/1.0" } });
+        let data = response.ok ? await response.json() : [];
+        if (!data[0]) {
+          const url2 = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(clean + ", Chennai, Tamil Nadu")}`;
+          response = await fetch(url2, { headers: { "User-Agent": "Astra-Chennai-Decision-Twin/1.0" } });
+          data = response.ok ? await response.json() : [];
+        }
+        if (data[0]) {
+          matched = {
+            name: data[0].display_name ?? trimmed,
+            lng: Number(data[0].lon),
+            lat: Number(data[0].lat),
+          };
         }
       } catch {
         // fallback

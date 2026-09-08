@@ -6,14 +6,19 @@ import { ChennaiMap } from "@/components/map/chennai-map";
 import { WeatherContextPanel } from "@/components/dashboard/weather-context";
 import { ScenarioComposer, type Result } from "@/components/scenario/scenario-composer";
 import { CitizenReportsPanel } from "@/components/dashboard/citizen-reports-panel";
+import { DecisionTwinSimulationPanel } from "@/components/dashboard/decision-twin-simulation-panel";
 import type { CitizenReport } from "@/lib/reports-store";
+import type { RouteOption } from "@/lib/data-sources/routing";
+import type { DecisionTwin, SimulationResult } from "@/lib/decision-twin";
 
 export default function DashboardPage() {
   const router = useRouter();
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [officerName, setOfficerName] = useState("Incident Commander");
-  const [floodLocation, setFloodLocation] = useState("Chennai Central");
+  const [floodLocation, setFloodLocation] = useState("Velachery, Chennai");
   const [focusedReport, setFocusedReport] = useState<CitizenReport | null>(null);
+  const [simulationRoutes, setSimulationRoutes] = useState<RouteOption[]>([]);
+  const [selectedRouteIndex, setSelectedRouteIndex] = useState<number>(0);
 
   // Enforce secure administrative authorization
   useEffect(() => {
@@ -91,10 +96,21 @@ export default function DashboardPage() {
           </p>
         </div>
 
-        {/* Scenario Composer */}
-        <ScenarioComposer
-          onScenarioBuilt={(result: Result) => {
-            if (result.place) setFloodLocation(result.place);
+        {/* Phase 8: Core Decision Twin & Deterministic Simulation Engine */}
+        <DecisionTwinSimulationPanel
+          initialPlace={floodLocation}
+          onDecisionTwinChange={(twin, sim) => {
+            if (twin.location?.name && twin.location.name !== floodLocation) {
+              setFloodLocation(twin.location.name);
+            }
+            if (twin.routes && twin.routes.length > 0) {
+              setSimulationRoutes(twin.routes);
+            }
+          }}
+          onSelectRoute={(idx) => {
+            setSelectedRouteIndex(idx);
+            const mapEl = document.getElementById("admin-chennai-map");
+            mapEl?.scrollIntoView({ behavior: "smooth" });
           }}
         />
 
@@ -109,6 +125,16 @@ export default function DashboardPage() {
           selectedReportId={focusedReport?.id}
         />
 
+        {/* Quick Scenario Natural Language Composer */}
+        <ScenarioComposer
+          onScenarioBuilt={(result: Result) => {
+            if (result.place) setFloodLocation(result.place);
+            if (result.routes && result.routes.length > 0) {
+              setSimulationRoutes(result.routes);
+            }
+          }}
+        />
+
         {/* Weather Context Panel */}
         <WeatherContextPanel />
 
@@ -119,6 +145,8 @@ export default function DashboardPage() {
             onDestinationChange={setFloodLocation}
             focusedReport={focusedReport}
             onClearFocusedReport={() => setFocusedReport(null)}
+            simulationRoutes={simulationRoutes}
+            selectedSimulationRouteIndex={selectedRouteIndex}
           />
         </div>
 

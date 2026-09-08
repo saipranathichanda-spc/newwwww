@@ -47,6 +47,8 @@ interface ChennaiMapProps {
   onDestinationChange?: (destination: string) => void;
   focusedReport?: CitizenReport | null;
   onClearFocusedReport?: () => void;
+  simulationRoutes?: RouteOption[];
+  selectedSimulationRouteIndex?: number;
 }
 
 export function ChennaiMap({
@@ -54,6 +56,8 @@ export function ChennaiMap({
   onDestinationChange,
   focusedReport,
   onClearFocusedReport,
+  simulationRoutes,
+  selectedSimulationRouteIndex = 0,
 }: ChennaiMapProps) {
   const mapNode = useRef<HTMLDivElement>(null);
   const mapRef = useRef<any>(null);
@@ -176,33 +180,37 @@ export function ChennaiMap({
     map.fitBounds(bounds, { padding: 60, maxZoom: 13.5 });
   }, [destination, mapReady]);
 
-  // Render routes on map
+  // Render routes on map (supports simulation candidate routes or default routes)
+  const activeRoutes = simulationRoutes && simulationRoutes.length > 0 ? simulationRoutes : routes;
+
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
-    for (let index = 0; index < 3; index += 1) {
+    for (let index = 0; index < 6; index += 1) {
       const id = `route-option-${index}`;
       if (map.getLayer(id)) map.removeLayer(id);
       if (map.getSource(id)) map.removeSource(id);
     }
-    routes.forEach((route, index) => {
+    activeRoutes.forEach((route, index) => {
       const id = `route-option-${index}`;
+      if (!route.geometry || (typeof route.geometry === "object" && Object.keys(route.geometry).length === 0)) return;
       map.addSource(id, {
         type: "geojson",
         data: { type: "Feature", properties: {}, geometry: route.geometry },
       });
+      const isSelected = index === selectedSimulationRouteIndex;
       map.addLayer({
         id,
         type: "line",
         source: id,
         paint: {
-          "line-color": index === 0 ? "#39d4b4" : "#f6c85f",
-          "line-width": index === 0 ? 5 : 3,
-          "line-opacity": index === 0 ? 0.92 : 0.7,
+          "line-color": isSelected ? "#39d4b4" : "#f6c85f",
+          "line-width": isSelected ? 6 : 3,
+          "line-opacity": isSelected ? 0.95 : 0.65,
         },
       });
     });
-  }, [routes, mapReady]);
+  }, [activeRoutes, mapReady, selectedSimulationRouteIndex]);
 
   // Handle focused citizen report inspection from Emergency Alerts desk
   useEffect(() => {

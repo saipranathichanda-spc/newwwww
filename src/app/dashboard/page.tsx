@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { ChennaiMap } from "@/components/map/chennai-map";
 import { DecisionTwinSimulationPanel } from "@/components/dashboard/decision-twin-simulation-panel";
 import { CitizenDispatchInterface } from "@/components/dashboard/citizen-dispatch-interface";
+import { FloodWisePanel } from "@/components/dashboard/floodwise-panel";
 import type { CitizenReport, IncidentStatus } from "@/lib/reports-store";
 import type { RouteOption } from "@/lib/data-sources/routing";
 import type { DecisionTwin, SimulationResult } from "@/lib/decision-twin";
@@ -14,8 +15,8 @@ export default function DashboardPage() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [officerName, setOfficerName] = useState("Incident Commander");
 
-  // Active Interface Mode: 'user-interface' (Citizen Distress Signals) vs 'decision-twin' (City-Scale Decision Twin & Simulation)
-  const [activeInterface, setActiveInterface] = useState<"user-interface" | "decision-twin">("decision-twin");
+  // Active Interface Mode: 'user-interface' vs 'decision-twin' vs 'floodwise' (Autonomous Multi-Agent Command)
+  const [activeInterface, setActiveInterface] = useState<"user-interface" | "decision-twin" | "floodwise">("floodwise");
 
   // Citizen Reports Feed & Live Notification State
   const [reports, setReports] = useState<CitizenReport[]>([]);
@@ -299,19 +300,19 @@ export default function DashboardPage() {
             </p>
           </div>
 
-          {/* TWO PRIMARY INTERFACE TABS */}
-          <div className="flex rounded-2xl border border-[#23354d] bg-[#0d1b2d] p-1.5 shadow-lg">
+          {/* THREE PRIMARY INTERFACE TABS */}
+          <div className="flex flex-wrap rounded-2xl border border-[#23354d] bg-[#0d1b2d] p-1.5 shadow-lg gap-1">
             <button
               type="button"
               onClick={() => setActiveInterface("user-interface")}
-              className={`flex items-center gap-2 rounded-xl px-5 py-2.5 text-xs font-bold transition-all ${
+              className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-bold transition-all ${
                 activeInterface === "user-interface"
                   ? "bg-[#39d4b4] text-[#062019] shadow-lg shadow-[#39d4b4]/30"
                   : "text-[#9aabc1] hover:text-[#e6edf7]"
               }`}
             >
               <span>🚨</span>
-              <span>1. User Interface (Citizen Distress)</span>
+              <span>1. User Interface (Distress Alerts)</span>
               {pendingReportsCount > 0 && (
                 <span
                   className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
@@ -328,7 +329,7 @@ export default function DashboardPage() {
             <button
               type="button"
               onClick={() => setActiveInterface("decision-twin")}
-              className={`flex items-center gap-2 rounded-xl px-5 py-2.5 text-xs font-bold transition-all ${
+              className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-bold transition-all ${
                 activeInterface === "decision-twin"
                   ? "bg-[#39d4b4] text-[#062019] shadow-lg shadow-[#39d4b4]/30"
                   : "text-[#9aabc1] hover:text-[#e6edf7]"
@@ -336,6 +337,19 @@ export default function DashboardPage() {
             >
               <span>🌐</span>
               <span>2. Decision Twin & Simulation</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveInterface("floodwise")}
+              className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-bold transition-all ${
+                activeInterface === "floodwise"
+                  ? "bg-gradient-to-r from-[#39d4b4] to-[#2db397] text-[#062019] shadow-lg shadow-[#39d4b4]/30"
+                  : "text-[#9aabc1] hover:text-[#e6edf7]"
+              }`}
+            >
+              <span>🤖</span>
+              <span>3. FloodWise Autonomous Command</span>
             </button>
           </div>
         </div>
@@ -384,6 +398,11 @@ export default function DashboardPage() {
               />
             </div>
           </div>
+        )}
+
+        {/* INTERFACE 3: FLOODWISE MULTI-AGENT AUTONOMOUS COMMAND */}
+        {activeInterface === "floodwise" && (
+          <FloodWisePanel />
         )}
 
         {/* Operational System Status Footer */}

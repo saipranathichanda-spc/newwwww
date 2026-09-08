@@ -31,6 +31,7 @@ async function fetchNominatim(query: string, useViewbox = true) {
       Accept: "application/json",
       "User-Agent": "Astra-Chennai-Decision-Twin/1.0"
     },
+    signal: AbortSignal.timeout(5000),
     next: { revalidate: 3600 }
   });
 

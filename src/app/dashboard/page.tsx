@@ -28,19 +28,26 @@ export default function DashboardPage() {
   const [simulationRoutes, setSimulationRoutes] = useState<RouteOption[]>([]);
   const [selectedRouteIndex, setSelectedRouteIndex] = useState<number>(0);
 
-  // Enforce secure administrative authorization
+  // Enforce secure server-side administrative authorization
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      const token = sessionStorage.getItem("astra_admin_token");
-      if (!token) {
+    fetch("/api/auth/session")
+      .then((res) => {
+        if (!res.ok) throw new Error("Unauthorized");
+        return res.json();
+      })
+      .then((data) => {
+        if (data.authenticated && data.officer) {
+          setIsAuthenticated(true);
+          setOfficerName(`${data.officer.name} (${data.officer.role})`);
+        } else {
+          setIsAuthenticated(false);
+          router.replace("/admin/login");
+        }
+      })
+      .catch(() => {
         setIsAuthenticated(false);
         router.replace("/admin/login");
-        return;
-      }
-      setIsAuthenticated(true);
-      const officer = sessionStorage.getItem("astra_admin_officer");
-      if (officer) setOfficerName(officer);
-    }
+      });
   }, [router]);
 
   // Audio alert chime when emergency signal arrives from /user
@@ -144,11 +151,13 @@ export default function DashboardPage() {
     setActiveInterface("decision-twin");
   }
 
-  function handleLogout() {
-    sessionStorage.removeItem("astra_admin_token");
-    sessionStorage.removeItem("astra_admin_officer");
-    document.cookie = "astra_admin_auth=; path=/; max-age=0";
-    router.replace("/admin/login");
+  async function handleLogout() {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } finally {
+      setIsAuthenticated(false);
+      router.replace("/admin/login");
+    }
   }
 
   // Prevent flash of admin controls if unauthorized

@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "tsx src/__tests__/production-safety.test.ts"
   },
   "dependencies": {
     "@types/mapbox-gl": "^3.5.0",

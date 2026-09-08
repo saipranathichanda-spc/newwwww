@@ -25,7 +25,55 @@ export function CitizenDispatchInterface({
   const [filter, setFilter] = useState<"ALL" | "PENDING" | "CRITICAL" | "RESOLVED">("ALL");
   const [updatingId, setUpdatingId] = useState<string | null>(null);
 
+  // Dispatch confirmation modal states
+  const [showDispatchModal, setShowDispatchModal] = useState(false);
+  const [dispatchReason, setDispatchReason] = useState("");
+  const [dispatching, setDispatching] = useState(false);
+  const [dispatchSuccess, setDispatchSuccess] = useState<string | null>(null);
+  const [dispatchError, setDispatchError] = useState("");
+
   const selectedReport = reports.find((r) => r.id === selectedReportId) || reports[0] || null;
+
+  async function handleConfirmCitizenDispatch() {
+    if (!selectedReport) return;
+    if (!dispatchReason.trim()) {
+      setDispatchError("Operational reason is required for dispatch authorization.");
+      return;
+    }
+    setDispatching(true);
+    setDispatchError("");
+    try {
+      const dispatch = calculateDispatchVehicles(selectedReport);
+      const res = await fetch("/api/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          locationName: selectedReport.location.name,
+          locationCoordinates: { lat: selectedReport.location.lat, lng: selectedReport.location.lng },
+          resources: dispatch,
+          corridor: "VIT Chennai Base → Radial Elevation Corridor",
+          distanceKm: selectedReport.distanceKm || 18,
+          reason: dispatchReason.trim(),
+        }),
+      });
+      if (res.ok) {
+        await onStatusUpdate(selectedReport.id, "DISPATCHED");
+        setDispatchSuccess("Fleet officially dispatched and logged to audit trail.");
+        setTimeout(() => {
+          setShowDispatchModal(false);
+          setDispatchSuccess(null);
+          setDispatchReason("");
+        }, 2000);
+      } else {
+        const d = await res.json();
+        setDispatchError(d.error || "Failed to record dispatch authorization.");
+      }
+    } catch {
+      setDispatchError("Failed to dispatch fleet due to network error.");
+    } finally {
+      setDispatching(false);
+    }
+  }
 
   const filteredReports = reports.filter((r) => {
     if (filter === "PENDING") return r.status === "PENDING";
@@ -317,11 +365,20 @@ export function CitizenDispatchInterface({
                 const dispatch = calculateDispatchVehicles(selectedReport);
                 return (
                   <div className="rounded-xl border border-[#39d4b4]/40 bg-[#0a272c] p-4 text-xs">
-                    <div className="flex items-center gap-2">
-                      <span className="text-base">🛡️</span>
-                      <span className="font-bold tracking-wider text-[#39d4b4] text-xs">
-                        RECOMMENDED VEHICLE & RESCUE DISPATCH
-                      </span>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-base">🛡️</span>
+                        <span className="font-bold tracking-wider text-[#39d4b4] text-xs">
+                          RECOMMENDED VEHICLE & RESCUE DISPATCH
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowDispatchModal(true)}
+                        className="rounded-lg bg-[#39d4b4] px-3 py-1 text-xs font-bold text-[#062019] hover:bg-[#69e8d1] shadow transition"
+                      >
+                        ⚡ Authorize Dispatch
+                      </button>
                     </div>
                     <p className="mt-2 text-sm text-[#e6edf7] font-semibold">
                       Deploy from VIT Chennai Base Hub:{" "}
@@ -377,6 +434,98 @@ export function CitizenDispatchInterface({
           )}
         </div>
       </div>
+
+      {/* Human Dispatch Confirmation Modal */}
+      {showDispatchModal && selectedReport && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-2xl border border-[#39d4b4]/50 bg-[#0a1829] p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-[#23354d] pb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">⚠️</span>
+                <h3 className="text-lg font-bold text-white">Authorize Real-World Dispatch</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowDispatchModal(false)}
+                className="text-gray-400 hover:text-white text-lg"
+                aria-label="Close modal"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-[#9aabc1]">
+              Confirming this dispatch will log an immutable incident record with your Officer ID, GPS coordinates, vehicle allocation, and operational timestamp.
+            </p>
+
+            <div className="rounded-xl bg-[#06101c] p-3 text-xs space-y-1.5 border border-[#1b2b40]">
+              <div className="flex justify-between">
+                <span className="text-[#9aabc1]">Target Incident:</span>
+                <span className="font-semibold text-white">{selectedReport.location.name} ({selectedReport.id})</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#9aabc1]">Trapped Citizens:</span>
+                <span className="font-semibold text-white">{selectedReport.peopleCount} persons</span>
+              </div>
+              {(() => {
+                const d = calculateDispatchVehicles(selectedReport);
+                return (
+                  <div className="flex justify-between">
+                    <span className="text-[#9aabc1]">Allocated Fleet:</span>
+                    <span className="font-mono text-[#39d4b4]">
+                      {d.buses} Buses · {d.boats} Boats · {d.ambulances} Amb · {d.rescueTeams} Teams
+                    </span>
+                  </div>
+                );
+              })()}
+            </div>
+
+            <div>
+              <label htmlFor="citizen-dispatch-reason" className="block text-xs font-semibold text-[#9aabc1] mb-1">
+                Operational Justification / Directives (Required):
+              </label>
+              <textarea
+                id="citizen-dispatch-reason"
+                value={dispatchReason}
+                onChange={(e) => setDispatchReason(e.target.value)}
+                placeholder="e.g. Life-safety priority, water depth rising, immediate arterial access verified."
+                rows={3}
+                className="w-full rounded-xl border border-[#23354d] bg-[#07111f] p-3 text-xs text-white focus:border-[#39d4b4] focus:outline-none"
+              />
+            </div>
+
+            {dispatchError && (
+              <p className="rounded-lg bg-red-500/20 border border-red-500/40 p-2 text-xs text-red-300">
+                {dispatchError}
+              </p>
+            )}
+            {dispatchSuccess && (
+              <p className="rounded-lg bg-emerald-500/20 border border-emerald-500/40 p-2 text-xs text-emerald-300">
+                {dispatchSuccess}
+              </p>
+            )}
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowDispatchModal(false)}
+                disabled={dispatching}
+                className="rounded-xl border border-gray-600 px-4 py-2 text-xs font-semibold text-gray-300 hover:bg-white/5"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmCitizenDispatch}
+                disabled={dispatching || !dispatchReason.trim()}
+                className="rounded-xl bg-[#39d4b4] px-5 py-2 text-xs font-bold text-[#062019] hover:bg-[#69e8d1] disabled:opacity-50 transition shadow"
+              >
+                {dispatching ? "Authorizing & Logging…" : "Confirm & Dispatch Fleet"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

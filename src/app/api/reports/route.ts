@@ -14,22 +14,68 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    if (!body.location?.lat || !body.location?.lng) {
-      return NextResponse.json({ error: "Location coordinates are required." }, { status: 400 });
+
+    const sessionId = body.sessionId || "anonymous";
+    const now = Date.now();
+
+    // 1. Duplicate report check: Look for recent report from the same session within 45 seconds
+    const existingReports = getAllReports();
+    const recentDuplicate = existingReports.find((r) => {
+      if (r.sessionId !== sessionId) return false;
+      const reportTime = new Date(r.timestamp).getTime();
+      return now - reportTime < 45000 && r.peopleCount === Number(body.peopleCount || 1);
+    });
+
+    if (recentDuplicate) {
+      return NextResponse.json(
+        {
+          ...recentDuplicate,
+          duplicateDetected: true,
+          message: "A duplicate distress signal was received from this session. Existing active incident confirmed.",
+        },
+        { status: 200 }
+      );
+    }
+
+    // 2. Handle missing GPS gracefully: fall back to neighborhood coordinates instead of rejecting
+    let lat = Number(body.location?.lat);
+    let lng = Number(body.location?.lng);
+    let locationName = body.location?.name?.trim() || "Chennai Flood Zone";
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      const lower = locationName.toLowerCase();
+      if (lower.includes("velachery")) {
+        lat = 12.9815;
+        lng = 80.2180;
+      } else if (lower.includes("tambaram")) {
+        lat = 12.9249;
+        lng = 80.1000;
+      } else if (lower.includes("t nagar") || lower.includes("t. nagar")) {
+        lat = 13.0418;
+        lng = 80.2341;
+      } else if (lower.includes("vit")) {
+        lat = 12.8406;
+        lng = 80.1534;
+      } else {
+        // Fallback: Greater Chennai Central coordinates
+        lat = 13.0827;
+        lng = 80.2757;
+        locationName = `${locationName} (GPS Unavailable · Chennai Default)`;
+      }
     }
 
     const report = createReport({
-      sessionId: body.sessionId || "anonymous",
+      sessionId,
       location: {
-        name: body.location.name || "Reported Location",
-        lat: Number(body.location.lat),
-        lng: Number(body.location.lng),
+        name: locationName,
+        lat,
+        lng,
       },
       destination: body.destination
         ? {
             name: body.destination.name || "Destination",
-            lat: Number(body.destination.lat),
-            lng: Number(body.destination.lng),
+            lat: Number(body.destination.lat) || 13.0827,
+            lng: Number(body.destination.lng) || 80.2757,
           }
         : undefined,
       distanceKm: body.distanceKm ? Number(body.distanceKm) : undefined,
@@ -63,12 +109,14 @@ export async function POST(request: NextRequest) {
 
 export async function PATCH(request: NextRequest) {
   try {
-    const body = (await request.json()) as { id: string; status: IncidentStatus };
-    if (!body.id || !body.status) {
-      return NextResponse.json({ error: "ID and status are required." }, { status: 400 });
+    const body = await request.json();
+    const { id, status } = body;
+
+    if (!id || !status) {
+      return NextResponse.json({ error: "Report ID and target status are required." }, { status: 400 });
     }
 
-    const updated = updateReportStatus(body.id, body.status);
+    const updated = updateReportStatus(id, status as IncidentStatus);
     if (!updated) {
       return NextResponse.json({ error: "Report not found." }, { status: 404 });
     }
@@ -76,6 +124,6 @@ export async function PATCH(request: NextRequest) {
     return NextResponse.json(updated);
   } catch (error) {
     console.error("Failed to update report status", error);
-    return NextResponse.json({ error: "Failed to update report status." }, { status: 500 });
+    return NextResponse.json({ error: "Failed to update incident status." }, { status: 500 });
   }
 }

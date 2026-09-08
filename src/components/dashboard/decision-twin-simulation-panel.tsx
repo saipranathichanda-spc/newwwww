@@ -148,6 +148,56 @@ export function DecisionTwinSimulationPanel({
   const [loadingBackend, setLoadingBackend] = useState(false);
   const [isAssumptionsExpanded, setIsAssumptionsExpanded] = useState(false);
 
+  // Human Dispatch Confirmation & Audit Log states
+  const [showDispatchModal, setShowDispatchModal] = useState(false);
+  const [dispatchReason, setDispatchReason] = useState("");
+  const [dispatching, setDispatching] = useState(false);
+  const [dispatchSuccess, setDispatchSuccess] = useState<string | null>(null);
+  const [dispatchError, setDispatchError] = useState("");
+
+  async function handleConfirmDispatch() {
+    if (!dispatchReason.trim()) {
+      setDispatchError("Please enter an operational justification for the mission audit record.");
+      return;
+    }
+    setDispatching(true);
+    setDispatchError("");
+    try {
+      const res = await fetch("/api/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          locationName: twin.location.name,
+          locationCoordinates: { lat: twin.location.lat, lng: twin.location.lng },
+          resources: {
+            buses: twin.resources.buses.value,
+            boats: twin.resources.boats.value,
+            ambulances: twin.resources.ambulances.value,
+            rescueTeams: twin.resources.rescueTeams.value,
+          },
+          corridor: bestRoute?.name || "Primary Corridor",
+          distanceKm: bestRoute?.distanceKm || 20,
+          reason: dispatchReason.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setDispatchSuccess(`Officially Authorized & Dispatched! Audit ID: ${data.record.id}`);
+        setTimeout(() => {
+          setShowDispatchModal(false);
+          setDispatchSuccess(null);
+          setDispatchReason("");
+        }, 3000);
+      } else {
+        setDispatchError(data.error || "Failed to submit official dispatch authorization.");
+      }
+    } catch {
+      setDispatchError("Network error while recording official dispatch.");
+    } finally {
+      setDispatching(false);
+    }
+  }
+
   // What-If handler: Instant resource changes
   function handleResourceChange(key: "buses" | "boats" | "ambulances" | "rescueTeams" | "budget", value: number) {
     const updated = updateDecisionTwinResources(twin, { [key]: value });
@@ -572,7 +622,18 @@ export function DecisionTwinSimulationPanel({
               Corridor Risk Index: <b className="text-amber-300 font-mono">{bestRoute?.riskScore ?? result.riskScore}/100</b>
             </p>
             <p>
-              Feasibility: <b className={result.feasible ? "text-emerald-400" : "text-red-400"}>{result.feasible ? "OPERATIONAL" : "CONSTRAINTS EXCEEDED"}</b>
+              Feasibility:{" "}
+              <b
+                className={
+                  result.feasibilityStatus === "OPERATIONAL"
+                    ? "text-emerald-400"
+                    : result.feasibilityStatus === "OPERATIONAL_WITH_SHORTAGE"
+                    ? "text-amber-400"
+                    : "text-red-400"
+                }
+              >
+                {result.feasibilityStatusLabel}
+              </b>
             </p>
           </div>
         </div>
@@ -594,6 +655,132 @@ export function DecisionTwinSimulationPanel({
               Estimated Cost: <b className="text-emerald-300 font-mono">₹{result.estimatedCostInr.toLocaleString()}</b>
             </p>
           </div>
+        </div>
+      </div>
+
+      {/* MANDATORY SIMULATION ONLY BANNER & HUMAN DISPATCH ACTION */}
+      <div className="mt-4 rounded-xl border border-amber-500/50 bg-amber-950/40 p-4 text-xs text-amber-200 shadow-xl flex flex-wrap items-center justify-between gap-3 animate-fadeIn">
+        <div className="flex items-center gap-3">
+          <span className="text-2xl animate-pulse">⚠️</span>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="rounded bg-amber-500/20 border border-amber-500/50 px-2 py-0.5 font-mono text-[11px] font-extrabold text-amber-300 tracking-wider">
+                SIMULATION ONLY · PENDING HUMAN COMMAND APPROVAL
+              </span>
+            </div>
+            <p className="mt-1 text-[11px] text-amber-100/90 leading-relaxed">
+              All routes, travel times, and fleet sizes remain theoretical decision-twin projections until an authorized disaster officer reviews and confirms deployment.
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setShowDispatchModal(true)}
+          className="rounded-xl bg-gradient-to-r from-[#39d4b4] to-[#2db397] px-4 py-2.5 text-xs font-extrabold text-[#062019] shadow-lg shadow-[#39d4b4]/30 hover:scale-105 active:scale-95 transition-all"
+        >
+          ✍️ Review & Authorize Dispatch →
+        </button>
+      </div>
+
+      {/* 5-FACTOR RISK DECOMPOSITION & TELEMETRY PROVENANCE */}
+      <div className="mt-4 rounded-2xl border border-[#23354d] bg-[#07111f] p-4 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#23354d] pb-2.5 mb-3">
+          <div>
+            <span className="text-xs font-bold tracking-wider text-[#39d4b4] flex items-center gap-1.5">
+              <span>📊</span> 5-FACTOR RISK DECOMPOSITION & DATA PROVENANCE
+            </span>
+            <p className="text-[10px] text-[#9aabc1] mt-0.5">
+              Disaggregating localized citizen hazard, transit corridor danger, rescue crew exposure, capacity shortfall, and telemetry confidence.
+            </p>
+          </div>
+          <span className="rounded-full bg-[#10233a] border border-[#39506e] px-2.5 py-0.5 font-mono text-[11px] text-[#69e8d1]">
+            Telemetry Confidence: <b>{result.riskDecomposition.dataConfidence}%</b>
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+          <RiskMetricCard
+            label="1. Citizen Flood Danger"
+            value={result.riskDecomposition.citizenFloodDanger}
+            source="Inundation Depth & Velocity"
+            detail="Immediate life-safety threat to civilians at incident site"
+          />
+          <RiskMetricCard
+            label="2. Road Corridor Risk"
+            value={result.riskDecomposition.roadCorridorRisk}
+            source="OSRM & GCC Bridge Crossings"
+            detail="Route inundation risk and canal bridge clearance"
+          />
+          <RiskMetricCard
+            label="3. Rescue Mission Risk"
+            value={result.riskDecomposition.rescueMissionRisk}
+            source="Hydrology Current & Access"
+            detail="Operational hazard to extraction crews & equipment"
+          />
+          <RiskMetricCard
+            label="4. Capacity Shortfall Risk"
+            value={result.riskDecomposition.capacityRisk}
+            source="Fleet Deficit vs Population"
+            detail="Exposure delay caused by multi-wave turnaround lag"
+          />
+          <RiskMetricCard
+            label="5. Telemetry Confidence"
+            value={result.riskDecomposition.dataConfidence}
+            source="ArcGIS + Open-Meteo Live"
+            detail="Data freshness and sensor verification rating"
+            isConfidence
+          />
+        </div>
+      </div>
+
+      {/* VERIFIED DISPATCH CAPACITY FORMULATION */}
+      <div className="mt-4 rounded-2xl border border-[#23354d] bg-[#07111f] p-4 text-xs">
+        <div className="border-b border-[#23354d] pb-2.5 mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <span className="text-xs font-bold tracking-wider text-[#39d4b4] flex items-center gap-1.5">
+              <span>📐</span> VERIFIED DISPATCH CAPACITY FORMULATION
+            </span>
+            <p className="text-[10px] text-[#9aabc1] mt-0.5">
+              Exact mathematical multipliers and multi-wave evacuation throughput equations.
+            </p>
+          </div>
+          <span className="font-mono text-xs font-bold text-white">
+            Shortfall Status:{" "}
+            <b className={result.capacityBreakdown.shortfallStatus === "DEFICIT" ? "text-red-400" : "text-emerald-400"}>
+              {result.capacityBreakdown.shortfallStatus === "DEFICIT"
+                ? `-${result.capacityBreakdown.shortfallOrSurplus} Seat Deficit`
+                : `+${result.capacityBreakdown.shortfallOrSurplus} Seat Surplus`}
+            </b>
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+          <div className="rounded-xl border border-[#1b2b3e] bg-[#0d1b2d] p-3">
+            <span className="text-[10px] text-[#9aabc1] block">Bus Passenger Equation:</span>
+            <p className="font-mono text-xs font-semibold text-white mt-1">{result.capacityBreakdown.busFormula}</p>
+          </div>
+          <div className="rounded-xl border border-[#1b2b3e] bg-[#0d1b2d] p-3">
+            <span className="text-[10px] text-[#9aabc1] block">Rescue Boat Equation:</span>
+            <p className="font-mono text-xs font-semibold text-cyan-300 mt-1">{result.capacityBreakdown.boatFormula}</p>
+          </div>
+          <div className="rounded-xl border border-[#1b2b3e] bg-[#0d1b2d] p-3">
+            <span className="text-[10px] text-[#9aabc1] block">Ambulance Triage Equation:</span>
+            <p className="font-mono text-xs font-semibold text-red-300 mt-1">{result.capacityBreakdown.ambulanceFormula}</p>
+          </div>
+          <div className="rounded-xl border border-[#1b2b3e] bg-[#0d1b2d] p-3">
+            <span className="text-[10px] text-[#9aabc1] block">Rescue Team Equation:</span>
+            <p className="font-mono text-xs font-semibold text-emerald-300 mt-1">{result.capacityBreakdown.rescueTeamFormula}</p>
+          </div>
+        </div>
+
+        <div className="mt-2.5 rounded-xl border border-[#23354d] bg-[#10233a] p-3 flex flex-wrap items-center justify-between gap-2">
+          <span className="text-[#e6edf7] text-[11px]">
+            <b>Sequential Evacuation Waves Formula:</b> <code className="font-mono text-[#39d4b4] ml-1">{result.capacityBreakdown.wavesFormula}</code>
+          </span>
+          <span className="text-[11px] text-[#9aabc1]">
+            Single-Wave Total: <b className="text-white font-mono">{result.capacityBreakdown.totalSingleWaveCapacity} seats</b>
+          </span>
         </div>
       </div>
 
@@ -1034,6 +1221,59 @@ export function DecisionTwinSimulationPanel({
               </div>
             )}
           </div>
+          {/* 4. MONTE CARLO STOCHASTIC ITERATION AUDIT TABLE */}
+          <div className="rounded-xl border border-[#23354d] bg-[#0d1b2d] p-4 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#23354d] pb-3 mb-3">
+              <div>
+                <span className="font-bold text-[#39d4b4] tracking-wider flex items-center gap-1.5">
+                  <span>🎲</span> MONTE CARLO ITERATION VARIANCE INSPECTION (Sample of 15 / {probResult.totalIterations})
+                </span>
+                <p className="text-[11px] text-[#9aabc1] mt-0.5">
+                  Auditing statistical variance: Risk, Rainfall, Traffic Multiplier, Fleet Capacity, and Evacuation Duration dynamically vary per iteration.
+                </p>
+              </div>
+              <span className="rounded-full bg-[#10233a] border border-[#39506e] px-2.5 py-0.5 text-[11px] font-mono text-[#69e8d1]">
+                Seed #{probResult.seed}
+              </span>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left font-mono text-[11px]">
+                <thead>
+                  <tr className="border-b border-[#23354d] text-[#9aabc1]">
+                    <th className="pb-2"># Run</th>
+                    <th className="pb-2">Rainfall</th>
+                    <th className="pb-2">Traffic Mult.</th>
+                    <th className="pb-2">Sampled Pop</th>
+                    <th className="pb-2">Capacity</th>
+                    <th className="pb-2">Duration</th>
+                    <th className="pb-2">Risk Score</th>
+                    <th className="pb-2">Cost</th>
+                    <th className="pb-2">Outcome</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#1b2b3e]">
+                  {probResult.sampledIterationsPreview.map((iter) => (
+                    <tr key={iter.iteration} className="hover:bg-[#10233a]">
+                      <td className="py-2 text-[#9aabc1]">Run {iter.iteration}</td>
+                      <td className="py-2 text-cyan-300">{iter.sampledRainfallMm} mm</td>
+                      <td className="py-2 text-amber-300">{iter.sampledTraffic}x</td>
+                      <td className="py-2 text-white">{iter.sampledPopulation.toLocaleString()}</td>
+                      <td className="py-2 text-[#39d4b4]">{iter.sampledCapacity} seats</td>
+                      <td className="py-2 font-bold text-white">{iter.evacuationTimeMinutes} min</td>
+                      <td className="py-2 font-bold text-amber-300">{iter.riskScore}/100</td>
+                      <td className="py-2 text-emerald-300">₹{iter.estimatedCostInr.toLocaleString()}</td>
+                      <td className="py-2">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${iter.feasible ? "bg-emerald-950/60 text-emerald-300 border border-emerald-500/40" : "bg-red-950/60 text-red-300 border border-red-500/40"}`}>
+                          {iter.feasible ? "SUCCESS" : "WINDOW EXCEEDED"}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1448,6 +1688,110 @@ export function DecisionTwinSimulationPanel({
           </div>
         </div>
       )}
+
+      {/* HUMAN DISPATCH CONFIRMATION MODAL */}
+      {showDispatchModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="dispatch-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fadeIn"
+        >
+          <div className="w-full max-w-lg rounded-3xl border border-[#39d4b4]/40 bg-[#0d1b2d] p-6 shadow-2xl text-xs space-y-4 text-[#e6edf7]">
+            <div className="flex items-center justify-between border-b border-[#23354d] pb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">🛡️</span>
+                <div>
+                  <h3 id="dispatch-modal-title" className="text-sm font-bold text-white">
+                    HUMAN COMMAND AUTHORIZATION REQUIRED
+                  </h3>
+                  <p className="text-[10px] text-[#9aabc1]">
+                    Disaster Management Protocol: Dispatch must be authorized by an authenticated officer.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowDispatchModal(false)}
+                className="text-lg text-[#9aabc1] hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Mission Summary Card */}
+            <div className="rounded-xl border border-[#23354d] bg-[#07111f] p-4 space-y-2.5">
+              <div className="flex justify-between">
+                <span className="text-[#9aabc1]">Incident Target:</span>
+                <b className="text-white font-mono">{twin.location.name}</b>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#9aabc1]">Target Coordinates:</span>
+                <span className="text-[#69e8d1] font-mono">{twin.location.lat.toFixed(4)}, {twin.location.lng.toFixed(4)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#9aabc1]">Assigned Corridor:</span>
+                <span className="text-white">{bestRoute?.name || "Route 1"} ({bestRoute?.distanceKm} km)</span>
+              </div>
+              <div className="flex justify-between border-t border-[#1b2b3e] pt-2">
+                <span className="text-[#9aabc1]">Authorized Fleet:</span>
+                <span className="font-bold text-[#39d4b4]">
+                  {twin.resources.buses.value} Buses · {twin.resources.boats.value} Boats · {twin.resources.ambulances.value} Ambulances · {twin.resources.rescueTeams.value} Teams
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#9aabc1]">Evacuation Waves:</span>
+                <span className="text-white">{result.wavesRequired} Wave(s) (Est. {result.evacuationTimeMinutes} min)</span>
+              </div>
+            </div>
+
+            {/* Officer Reason Input */}
+            <div>
+              <label htmlFor="dispatch-reason" className="block font-bold text-white mb-1">
+                Operational Rationale & Authorization Reason <span className="text-red-400">*</span>
+              </label>
+              <textarea
+                id="dispatch-reason"
+                rows={3}
+                value={dispatchReason}
+                onChange={(e) => setDispatchReason(e.target.value)}
+                placeholder="State the operational reason for authorizing this dispatch (e.g. Inundation depth confirmed at 30cm; primary GST route cleared; 8 buses allocated for first wave extraction)…"
+                className="w-full rounded-xl border border-[#39506e] bg-[#07111f] p-3 text-xs text-[#e6edf7] outline-none focus:border-[#39d4b4] focus:ring-2 focus:ring-[#39d4b4]/20"
+              />
+            </div>
+
+            {dispatchError && (
+              <div role="alert" className="rounded-xl border border-red-500/40 bg-red-500/10 p-2.5 text-red-200">
+                ⚠️ {dispatchError}
+              </div>
+            )}
+
+            {dispatchSuccess && (
+              <div role="status" className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-2.5 text-emerald-200 font-bold">
+                ✅ {dispatchSuccess}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowDispatchModal(false)}
+                className="rounded-xl border border-[#39506e] bg-[#10233a] px-4 py-2 text-xs font-semibold text-[#9aabc1] hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={dispatching || !dispatchReason.trim()}
+                onClick={handleConfirmDispatch}
+                className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-[#39d4b4] to-[#2db397] px-5 py-2.5 text-xs font-bold text-[#062019] shadow-lg shadow-[#39d4b4]/30 hover:scale-105 active:scale-95 disabled:opacity-50"
+              >
+                {dispatching ? "Recording Official Dispatch…" : "Confirm & Dispatch Fleet →"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -1558,6 +1902,42 @@ function PrioritySlider({
         className="mt-1 w-full accent-[#39d4b4]"
       />
       <p className="text-[10px] text-[#9aabc1]">{subtext}</p>
+    </div>
+  );
+}
+
+function RiskMetricCard({
+  label,
+  value,
+  source,
+  detail,
+  isConfidence = false,
+}: {
+  label: string;
+  value: number;
+  source: string;
+  detail: string;
+  isConfidence?: boolean;
+}) {
+  const isGood = isConfidence ? value >= 70 : value < 40;
+  const isMed = isConfidence ? value >= 50 && value < 70 : value >= 40 && value < 70;
+
+  return (
+    <div className="rounded-xl border border-[#23354d] bg-[#10233a] p-3 text-xs">
+      <span className="text-[11px] font-bold text-[#b6c4d5] block">{label}</span>
+      <div className="mt-1 flex items-baseline gap-1.5">
+        <span
+          className={`font-mono text-xl font-bold ${
+            isGood ? "text-emerald-400" : isMed ? "text-amber-300" : "text-red-400"
+          }`}
+        >
+          {value}{isConfidence ? "%" : "/100"}
+        </span>
+      </div>
+      <p className="mt-1 text-[10px] text-[#9aabc1] leading-tight">{detail}</p>
+      <div className="mt-2 pt-1 border-t border-[#1b2b3e] text-[9px] text-[#69e8d1] truncate">
+        Src: {source}
+      </div>
     </div>
   );
 }

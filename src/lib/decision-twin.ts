@@ -229,9 +229,41 @@ export interface ResourceAnalysis {
   status: "SURPLUS" | "BALANCED" | "DEFICIT";
 }
 
+export type FeasibilityStatus = "OPERATIONAL" | "OPERATIONAL_WITH_SHORTAGE" | "NOT_FEASIBLE";
+
+export interface FiveFactorRiskDecomposition {
+  citizenFloodDanger: number;   // 0 to 100: In-situ hazard for trapped citizens based on water depth & velocity
+  roadCorridorRisk: number;     // 0 to 100: Physical transit hazards, canal bridges, and underpass flooding
+  rescueMissionRisk: number;    // 0 to 100: Operational danger to rescue crew and vehicles during extraction
+  capacityRisk: number;         // 0 to 100: Risk from fleet deficit, multi-wave lag, or seat shortfall
+  dataConfidence: number;       // 0 to 100%: Provenance reliability of live telemetry vs fallback estimates
+}
+
+export interface CapacityFormulaBreakdown {
+  formulaTitle: string;
+  busFormula: string;
+  busCapacity: number;
+  boatFormula: string;
+  boatCapacity: number;
+  ambulanceFormula: string;
+  ambulanceCapacity: number;
+  rescueTeamFormula: string;
+  rescueTeamCapacity: number;
+  totalSingleWaveCapacity: number;
+  population: number;
+  wavesFormula: string;
+  wavesRequired: number;
+  shortfallOrSurplus: number;
+  shortfallStatus: "SURPLUS" | "BALANCED" | "DEFICIT";
+}
+
 export interface SimulationResult {
   scenarioId: string;
   feasible: boolean;
+  feasibilityStatus: FeasibilityStatus;
+  feasibilityStatusLabel: "OPERATIONAL" | "OPERATIONAL WITH SHORTAGE" | "NOT FEASIBLE";
+  riskDecomposition: FiveFactorRiskDecomposition;
+  capacityBreakdown: CapacityFormulaBreakdown;
   score: number;
   evacuationTimeMinutes: number;
   totalDistanceKm: number;
@@ -389,7 +421,8 @@ export function simulateDeterministicDecisionTwin(twin: DecisionTwin): Simulatio
         geometry: {},
         source: "OSRM",
         retrievedAt: new Date().toISOString(),
-        trafficStatus: "STANDARD_ROUTING"
+        trafficStatus: "STANDARD_ROUTING",
+        confidence: 0.88
       },
       {
         id: "route-radial-bypass",
@@ -398,7 +431,8 @@ export function simulateDeterministicDecisionTwin(twin: DecisionTwin): Simulatio
         geometry: {},
         source: "OSRM",
         retrievedAt: new Date().toISOString(),
-        trafficStatus: "STANDARD_ROUTING"
+        trafficStatus: "STANDARD_ROUTING",
+        confidence: 0.88
       },
       {
         id: "route-outer-expressway",
@@ -407,7 +441,8 @@ export function simulateDeterministicDecisionTwin(twin: DecisionTwin): Simulatio
         geometry: {},
         source: "OSRM",
         retrievedAt: new Date().toISOString(),
-        trafficStatus: "STANDARD_ROUTING"
+        trafficStatus: "STANDARD_ROUTING",
+        confidence: 0.88
       }
     ];
   } else if (effectiveRoutes.length === 1) {
@@ -711,15 +746,88 @@ export function simulateDeterministicDecisionTwin(twin: DecisionTwin): Simulatio
       ? "PRIORITY 2 · HIGH"
       : "PRIORITY 3 · STANDARD");
 
-  const recommendedPlan = `OPERATIONAL DIRECTIVE · ${deploymentPriority}: Dispatch emergency task force from VIT Chennai Base Hub to ${twin.location.name} (${primaryDistanceKm} km corridor, ~${oneWayTravelMinutes} min transit via ${selectedRoute?.name ?? "Primary Route"}). Deploying ${buses} buses (${busWaveCap} seats/wave), ${boats} rescue craft, ${ambulances} ambulances, and ${teams} rescue teams across ${wavesRequired} evacuation wave(s). Total operational evacuation duration is ${evacuationTimeMinutes} min with projected expenditure of ₹${estimatedCostInr.toLocaleString()}.`;
+  const recommendedPlan = isModeA
+    ? `Predefined fleet: ${buses} buses, ${boats} boats, ${ambulances} ambulances, ${teams} rescue teams.`
+    : `AI Optimal Deployment: ${optimalBuses} buses, ${optimalBoats} boats, ${optimalAmbulances} ambulances, ${optimalTeams} teams.`;
 
   const explanation = feasible
-    ? `The simulation confirms feasibility with an overall readiness score of ${finalScore}/100. Priority weighting (Safety: ${normalizedPriorities.safety}%, Speed: ${normalizedPriorities.speed}%, Cost: ${normalizedPriorities.cost}%) selected the ${selectedRoute?.name ?? "primary route"}. Total estimated evacuation time is ${evacuationTimeMinutes} minutes across ${wavesRequired} wave(s), with operational cost estimated at ₹${estimatedCostInr.toLocaleString()}.`
-    : `The current configuration is INFEASIBLE (Score: ${finalScore}/100) due to ${criticalViolations.length} critical constraint breach(es): ${criticalViolations.map((c) => c.constraint).join(", ")}. Immediate resource reallocation required.`;
+    ? `Deterministic simulation indicates feasible evacuation across ${wavesRequired} wave(s) totaling ~${evacuationTimeMinutes} minutes.`
+    : `Plan is constrained by resource bottlenecks or environmental thresholds.`;
+
+  let feasibilityStatus: FeasibilityStatus;
+  let feasibilityStatusLabel: "OPERATIONAL" | "OPERATIONAL WITH SHORTAGE" | "NOT FEASIBLE";
+
+  if (!feasible || singleWaveCapacity <= 0) {
+    feasibilityStatus = "NOT_FEASIBLE";
+    feasibilityStatusLabel = "NOT FEASIBLE";
+  } else if (singleWaveCapacity < pop || resourceStatus === "DEFICIT") {
+    feasibilityStatus = "OPERATIONAL_WITH_SHORTAGE";
+    feasibilityStatusLabel = "OPERATIONAL WITH SHORTAGE";
+  } else {
+    feasibilityStatus = "OPERATIONAL";
+    feasibilityStatusLabel = "OPERATIONAL";
+  }
+
+  // 5-Factor Risk Decomposition
+  const citizenFloodDanger = Math.min(100, Math.max(10, Math.round(
+    (rainfallMm > 20 ? 40 : rainfallMm > 5 ? 25 : 10) +
+    (riversCount > 2 ? 30 : riversCount > 0 ? 15 : 5) +
+    (historicalRisk === "VERY_HIGH" ? 25 : historicalRisk === "HIGH" ? 15 : 5) +
+    (pop > 5000 ? 10 : 0)
+  )));
+
+  const roadCorridorRisk = selectedRoute ? selectedRoute.riskScore : Math.min(95, baseRiskScore);
+
+  const rescueMissionRisk = Math.min(100, Math.max(10, Math.round(
+    (roadCorridorRisk * 0.45) +
+    (rainfallMm > 15 ? 30 : rainfallMm > 5 ? 15 : 5) +
+    (boats < 3 ? 25 : 5)
+  )));
+
+  const capacityRisk = singleWaveCapacity >= pop
+    ? 10
+    : Math.min(100, Math.round((Math.max(0, pop - singleWaveCapacity) / Math.max(1, pop)) * 75 + (wavesRequired > 3 ? 25 : 10)));
+
+  const dataConfidence = Math.round(
+    (twin.weatherContext ? 25 : 10) +
+    (twin.geographicContext ? 35 : 15) +
+    (twin.routes && twin.routes.length > 0 ? 30 : 10) +
+    (twin.hospitals && twin.hospitals.length > 0 ? 10 : 5)
+  );
+
+  const riskDecomposition: FiveFactorRiskDecomposition = {
+    citizenFloodDanger,
+    roadCorridorRisk,
+    rescueMissionRisk,
+    capacityRisk,
+    dataConfidence,
+  };
+
+  const capacityBreakdown: CapacityFormulaBreakdown = {
+    formulaTitle: "Deterministic Fleet Capacity & Multi-Wave Throughput Formulation",
+    busFormula: `${buses} buses × ${busCapacity} seats/wave = ${busWaveCap} passengers/wave`,
+    busCapacity: busWaveCap,
+    boatFormula: `${boats} boats × ${boatCapacity} persons/wave = ${boatWaveCap} persons/wave`,
+    boatCapacity: boatWaveCap,
+    ambulanceFormula: `${ambulances} ambulances × ${ambulanceCapacity} stretchers = ${ambulanceWaveCap} stretchers`,
+    ambulanceCapacity: ambulanceWaveCap,
+    rescueTeamFormula: `${teams} teams × ${rescueTeamCapacity} extractions/hr = ${teams * rescueTeamCapacity} civilians/hr`,
+    rescueTeamCapacity: teams * rescueTeamCapacity,
+    totalSingleWaveCapacity: singleWaveCapacity,
+    population: pop,
+    wavesFormula: `⌈ Population (${pop}) / Single-Wave Capacity (${singleWaveCapacity}) ⌉ = ${wavesRequired} wave(s)`,
+    wavesRequired,
+    shortfallOrSurplus: singleWaveCapacity >= pop ? unusedCapacity : singleWaveDeficit,
+    shortfallStatus: resourceStatus,
+  };
 
   return {
     scenarioId: twin.scenarioId,
     feasible,
+    feasibilityStatus,
+    feasibilityStatusLabel,
+    riskDecomposition,
+    capacityBreakdown,
     score: finalScore,
     evacuationTimeMinutes,
     totalDistanceKm: primaryDistanceKm,
@@ -924,7 +1032,7 @@ export function createDefaultDecisionTwin(params: {
     { label: "Incident Location", source: "Nominatim / OpenStreetMap", sourceType: "EXTERNAL_API", status: "VERIFIED" as const, retrievedAt: now, confidence: 0.95 },
     { label: "Driving Routes", source: "OSRM Route Service", sourceType: "EXTERNAL_API", status: "LIVE_OR_NEAR_LIVE" as const, retrievedAt: now, confidence: 0.92 },
     { label: "Rainfall & Wind", source: "Open-Meteo Weather API", sourceType: "EXTERNAL_API", status: params.weather ? ("LIVE_OR_NEAR_LIVE" as const) : ("UNAVAILABLE" as const), retrievedAt: now, confidence: 0.9 },
-    { label: "GCC GIS Features", source: "Greater Chennai Corporation REST", sourceType: "GIS_SERVER", status: params.gis ? ("VERIFIED" as const) : ("UNAVAILABLE" as const), retrievedAt: now, confidence: 0.95 },
+    { label: "GCC GIS Features", source: "Greater Chennai Corporation (GCC) REST Server", sourceType: "GIS_SERVER", status: params.gis ? ("VERIFIED" as const) : ("UNAVAILABLE" as const), retrievedAt: now, confidence: 0.95 },
     { label: "Disaster History", source: "Chennai Disaster Archive (2015-2023)", sourceType: "HISTORICAL_ARCHIVE", status: "HISTORICAL" as const, retrievedAt: now, confidence: 0.98 },
     { label: "Hospital Capacity", source: "State Health Desk", sourceType: "NONE", status: "UNAVAILABLE" as const, retrievedAt: now, confidence: 0.0 }
   ];

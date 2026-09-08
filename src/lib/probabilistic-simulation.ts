@@ -56,6 +56,8 @@ export interface MonteCarloIterationSummary {
   feasible: boolean;
   sampledPopulation: number;
   sampledRainfallMm: number;
+  sampledCapacity: number;
+  sampledTraffic: number;
 }
 
 export interface ProbabilisticSimulationResult {
@@ -309,6 +311,11 @@ export function runMonteCarloSimulation(
     const sampledTravelDelay = Math.round(sampleVariable(uncertainties.travelTime, prng));
     const sampledAttrition = Math.round(sampleVariable(uncertainties.vehicleAvailability, prng));
     const sampledStagingDelay = Math.round(sampleVariable(uncertainties.responseDelay, prng));
+    const sampledDisruption = Math.round(sampleVariable(uncertainties.routeDisruption, prng));
+    const sampledInundation = Math.round(sampleVariable(uncertainties.roadAccessibility, prng));
+
+    const iterationBuses = Math.max(1, twin.resources.buses.value - sampledAttrition);
+    const iterationCapacity = (iterationBuses * 40) + (twin.resources.boats.value * 8);
 
     // 2. Clone twin state for iteration (never mutate original)
     const clone: DecisionTwin = {
@@ -321,7 +328,7 @@ export function runMonteCarloSimulation(
         ...twin.resources,
         buses: {
           ...twin.resources.buses,
-          value: Math.max(1, twin.resources.buses.value - sampledAttrition)
+          value: iterationBuses
         }
       },
       weatherContext: twin.weatherContext
@@ -341,6 +348,12 @@ export function runMonteCarloSimulation(
       Math.round((simResult.evacuationTimeMinutes + sampledTravelDelay + (sampledStagingDelay - 15)) * sampledTraffic)
     );
 
+    // Vary road and corridor risk based on sampled surge disruption and inundation probability
+    const adjustedRisk = Math.min(
+      100,
+      Math.max(5, Math.round(simResult.riskScore + (sampledDisruption - 10) + (sampledInundation > 15 ? 8 : -2)))
+    );
+
     // Iteration success criteria: feasible AND within response time limit and budget tolerance
     const isSuccessful =
       simResult.feasible &&
@@ -353,13 +366,13 @@ export function runMonteCarloSimulation(
 
     times.push(adjustedTime);
     costs.push(simResult.estimatedCostInr);
-    risks.push(simResult.riskScore);
+    risks.push(adjustedRisk);
     scores.push(simResult.score);
 
     // Risk distribution tally
-    if (simResult.riskScore < 35) lowRiskCount++;
-    else if (simResult.riskScore < 60) modRiskCount++;
-    else if (simResult.riskScore < 80) highRiskCount++;
+    if (adjustedRisk < 35) lowRiskCount++;
+    else if (adjustedRisk < 60) modRiskCount++;
+    else if (adjustedRisk < 80) highRiskCount++;
     else critRiskCount++;
 
     // Preview for first 15 iterations
@@ -368,11 +381,13 @@ export function runMonteCarloSimulation(
         iteration: i + 1,
         evacuationTimeMinutes: adjustedTime,
         estimatedCostInr: simResult.estimatedCostInr,
-        riskScore: simResult.riskScore,
+        riskScore: adjustedRisk,
         score: simResult.score,
         feasible: isSuccessful,
         sampledPopulation: sampledPop,
-        sampledRainfallMm: sampledRainfall
+        sampledRainfallMm: sampledRainfall,
+        sampledCapacity: iterationCapacity,
+        sampledTraffic: Math.round(sampledTraffic * 100) / 100
       });
     }
   }

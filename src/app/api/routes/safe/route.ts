@@ -4,6 +4,8 @@ import { getCurrentWeather, type WeatherContext } from "@/lib/data-sources/weath
 import { searchNearbyHospitals, type Hospital } from "@/lib/data-sources/hospitals";
 import { getStormWaterDrainsInArea, getRiversInArea, type GeographicArea } from "@/lib/data-sources/gccGIS";
 
+import { findNearbyShelters, EMERGENCY_HELPLINES, type VerifiedShelter, type EmergencyContact } from "@/lib/data-sources/shelters";
+
 export type SafeRouteEvaluation = {
   id: string;
   routeIndex: number;
@@ -25,6 +27,8 @@ export type SafeRouteResult = {
   allRoutes: SafeRouteEvaluation[];
   weather: WeatherContext | null;
   nearbyHospitals: Array<{ name: string; distanceKm: number | null; travelMinutes: number | null; address: string | null; phone: string | null; source: string }>;
+  nearbyShelters: VerifiedShelter[];
+  emergencyHelplines: EmergencyContact[];
   safetyWarnings: string[];
   gisDrainsCount: number;
   gisRiversCount: number;
@@ -62,7 +66,21 @@ export async function POST(request: NextRequest) {
     ]);
 
     if (!rawRoutes.length) {
-      return NextResponse.json({ error: "Could not calculate driving or evacuation routes between these points." }, { status: 404 });
+      const shelters = findNearbyShelters(origin.lat, origin.lng);
+      return NextResponse.json(
+        {
+          error: "All direct road corridors between origin and destination are currently obstructed or impassable.",
+          routeFailed: true,
+          nearbyShelters: shelters,
+          emergencyHelplines: EMERGENCY_HELPLINES,
+          safetyInstructions: [
+            "Do NOT attempt to drive or walk through submerged roads or railway underpasses.",
+            "Seek high ground immediately at the nearest verified GCC relief shelter.",
+            "Call GCC Flood Helpline 1913 or 108 Emergency Ambulance for immediate rescue.",
+          ],
+        },
+        { status: 404 }
+      );
     }
 
     const drainsCount = drains?.features.length ?? 0;
@@ -202,6 +220,8 @@ export async function POST(request: NextRequest) {
       };
     });
 
+    const shelters = findNearbyShelters(origin.lat, origin.lng);
+
     const result: SafeRouteResult = {
       origin: { name: origin.name, lat: origin.lat, lng: origin.lng },
       destination: { name: destination.name, lat: destination.lat, lng: destination.lng },
@@ -209,6 +229,8 @@ export async function POST(request: NextRequest) {
       allRoutes: evaluatedRoutes,
       weather,
       nearbyHospitals,
+      nearbyShelters: shelters,
+      emergencyHelplines: EMERGENCY_HELPLINES,
       safetyWarnings,
       gisDrainsCount: drainsCount,
       gisRiversCount: riversCount,
@@ -217,6 +239,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(result);
   } catch (error) {
     console.error("Safe route calculation error", error);
-    return NextResponse.json({ error: "Failed to calculate safe route with live risk parameters." }, { status: 500 });
+    const fallbackShelters = findNearbyShelters(13.0827, 80.2757);
+    return NextResponse.json(
+      {
+        error: "Route evaluation service encountered an error. Primary corridors may be blocked or unreachable.",
+        fallbackShelters,
+        emergencyHelplines: EMERGENCY_HELPLINES,
+      },
+      { status: 500 }
+    );
   }
 }

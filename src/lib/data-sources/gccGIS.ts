@@ -11,7 +11,10 @@ export async function getGccLayerInArea(layer: GccLayerKey, area: GeographicArea
     geometryType: "esriGeometryEnvelope", geometry: `${area.west},${area.south},${area.east},${area.north}`,
     inSR: "4326", spatialRel: "esriSpatialRelIntersects", resultRecordCount: "1000",
   });
-  const response = await fetch(`${SERVICE_URL}/${LAYER_IDS[layer]}/query?${params}`, { next: { revalidate: 300 } });
+  const response = await fetch(`${SERVICE_URL}/${LAYER_IDS[layer]}/query?${params}`, {
+    signal: AbortSignal.timeout(6000),
+    next: { revalidate: 300 },
+  });
   if (!response.ok) throw new Error(`GCC GIS returned ${response.status}`);
   const raw = await response.json() as { features?: Array<{ id?: string | number; geometry: Record<string, unknown>; properties?: Record<string, unknown> }> };
   const retrievedAt = new Date().toISOString();
